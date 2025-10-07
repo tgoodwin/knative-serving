@@ -19,24 +19,24 @@ limitations under the License.
 package v1
 
 import (
-	"context"
+	context "context"
 	time "time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
-	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	apisservingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	versioned "knative.dev/serving/pkg/client/clientset/versioned"
 	internalinterfaces "knative.dev/serving/pkg/client/informers/externalversions/internalinterfaces"
-	v1 "knative.dev/serving/pkg/client/listers/serving/v1"
+	servingv1 "knative.dev/serving/pkg/client/listers/serving/v1"
 )
 
 // RouteInformer provides access to a shared informer and lister for
 // Routes.
 type RouteInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.RouteLister
+	Lister() servingv1.RouteLister
 }
 
 type routeInformer struct {
@@ -62,16 +62,28 @@ func NewFilteredRouteInformer(client versioned.Interface, namespace string, resy
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.ServingV1().Routes(namespace).List(context.TODO(), options)
+				return client.ServingV1().Routes(namespace).List(context.Background(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.ServingV1().Routes(namespace).Watch(context.TODO(), options)
+				return client.ServingV1().Routes(namespace).Watch(context.Background(), options)
+			},
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.ServingV1().Routes(namespace).List(ctx, options)
+			},
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+				if tweakListOptions != nil {
+					tweakListOptions(&options)
+				}
+				return client.ServingV1().Routes(namespace).Watch(ctx, options)
 			},
 		},
-		&servingv1.Route{},
+		&apisservingv1.Route{},
 		resyncPeriod,
 		indexers,
 	)
@@ -82,9 +94,9 @@ func (f *routeInformer) defaultInformer(client versioned.Interface, resyncPeriod
 }
 
 func (f *routeInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&servingv1.Route{}, f.defaultInformer)
+	return f.factory.InformerFor(&apisservingv1.Route{}, f.defaultInformer)
 }
 
-func (f *routeInformer) Lister() v1.RouteLister {
-	return v1.NewRouteLister(f.Informer().GetIndexer())
+func (f *routeInformer) Lister() servingv1.RouteLister {
+	return servingv1.NewRouteLister(f.Informer().GetIndexer())
 }

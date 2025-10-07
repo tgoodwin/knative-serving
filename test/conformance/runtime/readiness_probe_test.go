@@ -38,17 +38,20 @@ import (
 	v1test "knative.dev/serving/test/v1"
 )
 
-// readinessPropagationTime is how long to poll to allow for readiness probe
-// changes to propagate to ingresses/activator.
-//
-// When Readiness.PeriodSeconds=0 the underlying Pods use the K8s
-// defaults for readiness. Those are:
-// - Readiness.PeriodSeconds=10
-// - Readiness.FailureThreshold=3
-//
-// Thus it takes at a mininum 30 seconds for the Pod to become
-// unready. To account for this we bump max propagation time
-const readinessPropagationTime = time.Minute
+const (
+	// readinessPropagationTime is how long to poll to allow for readiness probe
+	// changes to propagate to ingresses/activator.
+	//
+	// When Readiness.PeriodSeconds=0 the underlying Pods use the K8s
+	// defaults for readiness. Those are:
+	// - Readiness.PeriodSeconds=10
+	// - Readiness.FailureThreshold=3
+	//
+	// Thus it takes at a mininum 30 seconds for the Pod to become
+	// unready. To account for this we bump max propagation time
+	readinessPropagationTime = time.Minute
+	readinessPath            = "/healthz/readiness"
+)
 
 func TestProbeRuntime(t *testing.T) {
 	t.Parallel()
@@ -57,7 +60,7 @@ func TestProbeRuntime(t *testing.T) {
 	}
 	clients := test.Setup(t)
 
-	var testCases = []struct {
+	testCases := []struct {
 		// name of the test case, which will be inserted in names of routes, configurations, etc.
 		// Use a short name here to avoid hitting the 63-character limit in names
 		// (e.g., "service-to-service-call-svc-cluster-local-uagkdshh-frkml-service" is too long.)
@@ -72,7 +75,7 @@ func TestProbeRuntime(t *testing.T) {
 		}},
 		handler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/healthz",
+				Path: readinessPath,
 			},
 		},
 	}, {
@@ -98,9 +101,7 @@ func TestProbeRuntime(t *testing.T) {
 	}}
 
 	for _, tc := range testCases {
-		tc := tc
 		for _, period := range []int32{0, 1} {
-			period := period
 			name := tc.name
 			if period > 0 {
 				// period > 0 opts out of the custom knative startup probing behaviour.
@@ -130,7 +131,7 @@ func TestProbeRuntime(t *testing.T) {
 
 				// Once the service reports ready we should immediately be able to curl it.
 				url := resources.Route.Status.URL.URL()
-				url.Path = "/healthz"
+				url.Path = readinessPath
 				if _, err = pkgtest.CheckEndpointState(
 					context.Background(),
 					clients.KubeClient,
@@ -166,7 +167,6 @@ func TestProbeRuntimeAfterStartup(t *testing.T) {
 	}
 
 	for _, period := range []int32{0, 1} {
-		period := period
 		t.Run(fmt.Sprintf("periodSeconds=%d", period), func(t *testing.T) {
 			t.Parallel()
 			clients := test.Setup(t)
@@ -174,7 +174,7 @@ func TestProbeRuntimeAfterStartup(t *testing.T) {
 			test.EnsureTearDown(t, clients, &names)
 
 			url, client := waitReadyThenStartFailing(t, clients, names, period)
-			if err := wait.PollImmediate(1*time.Second, readinessPropagationTime, func() (bool, error) {
+			if err := wait.PollUntilContextTimeout(context.Background(), 1*time.Second, readinessPropagationTime, true, func(context.Context) (bool, error) {
 				startFailing, err := http.NewRequest(http.MethodGet, url.String(), nil)
 				if err != nil {
 					return false, err
@@ -225,7 +225,7 @@ func waitReadyThenStartFailing(t *testing.T, clients *test.Clients, names test.R
 			PeriodSeconds: probePeriod,
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
+					Path: readinessPath,
 				},
 			},
 		}))

@@ -16,10 +16,7 @@ env:
   REGISTRY_NAME: registry.local
   REGISTRY_PORT: 5000
   KO_DOCKER_REPO: registry.local:5000/knative
-  KIND_VERSION: 0.19.0
-  GOTESTSUM_VERSION: 1.7.0
-  KAPP_VERSION: 0.46.0
-  YTT_VERSION: 0.40.1
+  GOTESTSUM_VERSION: 1.12.0
   KO_FLAGS: --platform=linux/amd64
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -28,19 +25,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-    - name: Set up Go 1.19.x
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.19.x
+    - name: setup-go
+      uses: knative/actions/setup-go@main
 
     - name: Setup Cache Directories
       run: |
         mkdir -p ~/artifacts/build
         mkdir -p ~/artifacts/registry
 
-    - uses: actions/cache@v3
+    - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: |
           ~/.cache/go-build
@@ -51,7 +46,7 @@ jobs:
 
     # Install the latest release of ko
     - name: Install ko
-      uses: ko-build/setup-ko@v0.6
+      uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
 
     - name: Setup Registry
       run: |
@@ -73,7 +68,7 @@ jobs:
       run: |
         ./test/upload-test-images.sh
 
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: artifacts
         path: ~/artifacts
@@ -82,23 +77,24 @@ jobs:
   test:
     name: test
     needs: build
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false # Keep running if one leg fails.
       matrix:
         k8s-version:
-        - v1.25.x
-        - v1.26.x
-        - v1.27.x
+        - v1.32.x
+        - v1.33.x
 
         ingress:
         - kourier
         - kourier-tls
         - istio
-        - istio-ambient
+        - istio-tls
+        # Disabled due to flakiness: https://github.com/knative/serving/issues/14637
+        # - istio-ambient
         - contour
-        # Disabled due to consistent failures
-        # - gateway_istio
+        - gateway_istio
+        - gateway_contour
 
         test-suite:
         - runtime
@@ -106,11 +102,16 @@ jobs:
         - e2e
 
         include:
-        # Disabled due to consistent failures
-        # - ingress: gateway_istio
-        #   ingress-class: gateway-api
-        #   test-flags: -enable-alpha
-        #   namespace-resources: httproute
+        - ingress: gateway_istio
+          ingress-class: gateway-api
+          test-flags: -enable-alpha -enable-beta
+          namespace-resources: httproute
+
+        - ingress: gateway_contour
+          ingress-class: gateway-api
+          gateway-api-implementation: contour
+          test-flags: -enable-alpha -enable-beta
+          namespace-resources: httproute
 
         - ingress: contour
           namespace-resources: httpproxy
@@ -118,10 +119,16 @@ jobs:
         - ingress: istio
           namespace-resources: virtualservices
 
-        - ingress: istio-ambient
-          namespace-resources: virtualservices
+        - ingress: istio-tls
           ingress-class: istio
-          ambient: 1
+          namespace-resources: virtualservices
+          enable-tls: 1
+
+        # Disabled due to flakiness: https://github.com/knative/serving/issues/14637
+        # - ingress: istio-ambient
+        #   namespace-resources: virtualservices
+        #   ingress-class: istio
+        #   ambient: 1
 
         - ingress: kourier-tls
           ingress-class: kourier
@@ -139,16 +146,16 @@ jobs:
     env:
       KIND: 1
       INGRESS_CLASS: ${{ matrix.ingress-class || matrix.ingress }}.ingress.networking.knative.dev
+      GATEWAY_API_IMPLEMENTATION: ${{ matrix.gateway-api-implementation }}
       ENABLE_TLS: ${{ matrix.enable-tls || 0 }}
-      AMBIENT: ${{ matrix.ambient || 0 }}
+      # Disabled due to flakiness: https://github.com/knative/serving/issues/14637
+      # AMBIENT: ${{ matrix.ambient || 0 }}
 
     steps:
-    - name: Set up Go 1.19.x
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.19.x
+    - name: setup-go
+      uses: knative/actions/setup-go@main
 
-    - uses: actions/cache@v3
+    - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: |
           ~/.cache/go-build
@@ -157,20 +164,19 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-go-
 
-    - uses: actions/download-artifact@v3
+    - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
       with:
         name: artifacts
         path: ~/artifacts
 
-    - name: Setup KinD 
-      uses: chainguard-dev/actions/setup-kind@main
+    - name: setup kind
+      uses: chainguard-dev/actions/setup-kind@3caedd3784c809ba873cbb8c6a12e2bc6bf6ab09 # main
       with:
         k8s-version: ${{ matrix.k8s-version }}
         kind-worker-count: 4
         cluster-suffix: c${{ github.run_id }}.local
         registry-volume: $HOME/artifacts/registry
 
- 
     - name: Install Dependencies
       run: |
         set -x
@@ -180,19 +186,7 @@ jobs:
         sudo mv gotestsum /usr/local/bin
         echo "::endgroup::"
 
-        echo "::group:: install kapp ${KAPP_VERSION}"
-        curl -Lo ./kapp https://github.com/vmware-tanzu/carvel-kapp/releases/download/v${KAPP_VERSION}/kapp-linux-amd64
-        chmod +x ./kapp
-        sudo mv kapp /usr/local/bin
-        echo "::endgroup::"
-
-        echo "::group:: install ytt ${YTT_VERSION}"
-        curl -Lo ./ytt https://github.com/vmware-tanzu/carvel-ytt/releases/download/v${YTT_VERSION}/ytt-linux-amd64
-        chmod +x ./ytt
-        sudo mv ytt /usr/local/bin
-        echo "::endgroup::"
-
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       with:
         fetch-depth: 0
 
@@ -221,10 +215,12 @@ jobs:
           -timeout=30m \
           ${{ matrix.test-path }} \
           -skip-cleanup-on-fail \
+          -disable-logstream \
           -enable-alpha -enable-beta \
-          --ingress-class=${{ matrix.ingress-class || matrix.ingress }}.ingress.networking.knative.dev
- 
-    - uses: chainguard-dev/actions/kind-diag@main
+          --ingress-class=${{ matrix.ingress-class || matrix.ingress }}.ingress.networking.knative.dev \
+          ${{ matrix.test-flags }}
+
+    - uses: chainguard-dev/actions/kind-diag@3caedd3784c809ba873cbb8c6a12e2bc6bf6ab09 # main
       # Only upload logs on failure.
       if: ${{ failure() }}
       with:

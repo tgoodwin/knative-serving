@@ -50,7 +50,6 @@ func TestAutoscaleUpDownUp(t *testing.T) {
 		autoscaling.MetricAggregationAlgorithmLinear,
 		autoscaling.MetricAggregationAlgorithmWeightedExponential,
 	} {
-		algo := algo
 		t.Run("aggregation-"+algo, func(t *testing.T) {
 			t.Parallel()
 			ctx := SetupSvc(t,
@@ -122,7 +121,6 @@ func TestAutoscaleSustaining(t *testing.T) {
 		autoscaling.MetricAggregationAlgorithmLinear,
 		autoscaling.MetricAggregationAlgorithmWeightedExponential,
 	} {
-		algo := algo
 		t.Run("aggregation-"+algo, func(t *testing.T) {
 			// When traffic increases, a knative app should scale up and sustain the scale
 			// as long as the traffic sustains, despite whether it is switching modes between
@@ -175,8 +173,7 @@ func TestTargetBurstCapacity(t *testing.T) {
 	}
 
 	// TODO: Remove this when "activator always stay in path" is eliminated.
-	dataplaneTrustMode := cm.Data[netcfg.DataplaneTrustKey]
-	if (dataplaneTrustMode != "" && !strings.EqualFold(dataplaneTrustMode, string(netcfg.TrustDisabled))) || strings.EqualFold(cm.Data[netcfg.InternalEncryptionKey], "true") {
+	if strings.EqualFold(cm.Data[netcfg.SystemInternalTLSKey], string(netcfg.EncryptionEnabled)) {
 		t.Skip("Skipping TestTargetBurstCapacity as activator always stay in path.")
 	}
 
@@ -207,7 +204,7 @@ func TestTargetBurstCapacity(t *testing.T) {
 
 	// Wait for two stable pods.
 	obsScale := 0.0
-	if err := wait.Poll(250*time.Millisecond, 2*cfg.StableWindow, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), 250*time.Millisecond, 2*cfg.StableWindow, true, func(context.Context) (bool, error) {
 		obsScale, _, err = numberOfReadyPods(ctx)
 		if err != nil {
 			return false, err
@@ -221,7 +218,7 @@ func TestTargetBurstCapacity(t *testing.T) {
 	// Now read the service endpoints and make sure there are 2 endpoints there.
 	// We poll, since network programming takes times, but the timeout is set for
 	// uniformness with one above.
-	if err := wait.Poll(250*time.Millisecond, 2*cfg.StableWindow, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), 250*time.Millisecond, 2*cfg.StableWindow, true, func(context.Context) (bool, error) {
 		svcEps, err := ctx.clients.KubeClient.CoreV1().Endpoints(test.ServingFlags.TestNamespace).Get(
 			context.Background(), ctx.resources.Revision.Name, /* revision service name is equal to revision name*/
 			metav1.GetOptions{})
@@ -301,7 +298,6 @@ func TestTargetBurstCapacityZero(t *testing.T) {
 		test.ServingFlags.TestNamespace,
 		time.Minute,
 	)
-
 	if err != nil {
 		t.Error(err)
 	}
@@ -339,7 +335,7 @@ func TestFastScaleToZero(t *testing.T) {
 	// test allows for up to a minute). The 15s delay is based upon maximum
 	// of 20 runs (11s) + 4s of buffer for reliability.
 	st := time.Now()
-	if err := wait.PollImmediate(1*time.Second, cfg.ScaleToZeroGracePeriod+15*time.Second, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), 1*time.Second, cfg.ScaleToZeroGracePeriod+15*time.Second, true, func(context.Context) (bool, error) {
 		eps, err := ctx.clients.KubeClient.CoreV1().Endpoints(test.ServingFlags.TestNamespace).Get(context.Background(), epsN, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -362,7 +358,8 @@ func TestActivationScale(t *testing.T) {
 			Class:             autoscaling.KPA,
 			Metric:            autoscaling.Concurrency,
 			Target:            6,
-			TargetUtilization: 0.7},
+			TargetUtilization: 0.7,
+		},
 		test.Options{},
 		rtesting.WithConfigAnnotations(map[string]string{
 			autoscaling.ActivationScaleKey: strconv.Itoa(activationScale),
@@ -376,14 +373,14 @@ func TestActivationScale(t *testing.T) {
 	}
 
 	// initial scale of revision
-	if err := wait.Poll(1*time.Second, 5*time.Minute, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 5*time.Minute, true, func(context.Context) (bool, error) {
 		return *resources.Revision.Status.ActualReplicas > 0, nil
 	}); err != nil {
 		t.Errorf("error: revision never had active pods")
 	}
 
 	// scale to zero
-	if err := wait.Poll(1*time.Second, 5*time.Minute, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 5*time.Minute, true, func(context.Context) (bool, error) {
 		resources, _ = testv1.GetResourceObjects(clients, *ctx.names)
 		return *resources.Revision.Status.ActualReplicas == 0, nil
 	}); err != nil {
@@ -407,7 +404,7 @@ func TestActivationScale(t *testing.T) {
 	}
 
 	// wait for revision desired replicas to equal activation scale
-	if err := wait.Poll(1*time.Second, 5*time.Minute, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 5*time.Minute, true, func(context.Context) (bool, error) {
 		resources, _ = testv1.GetResourceObjects(clients, *ctx.names)
 		return *resources.Revision.Status.DesiredReplicas == activationScale, nil
 	}); err != nil {

@@ -35,6 +35,17 @@ spec:
         app.kubernetes.io/name: knative-serving
         app.kubernetes.io/version: devel
     spec:
+      # To avoid node becoming SPOF, spread our replicas to different nodes.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: activator
+                topologyKey: kubernetes.io/hostname
+              weight: 100
+
       serviceAccountName: activator
       containers:
       - name: activator
@@ -72,9 +83,6 @@ spec:
           value: config-logging
         - name: CONFIG_OBSERVABILITY_NAME
           value: config-observability
-        # TODO(https://github.com/knative/pkg/pull/953): Remove stackdriver specific config
-        - name: METRICS_DOMAIN
-          value: knative.dev/internal/serving
 
         securityContext:
           allowPrivilegeEscalation: false
@@ -99,17 +107,11 @@ spec:
         readinessProbe:
           httpGet:
             port: 8012
-            httpHeaders:
-            - name: k-kubelet-probe
-              value: "activator"
           periodSeconds: 5
           failureThreshold: 5
         livenessProbe:
           httpGet:
             port: 8012
-            httpHeaders:
-            - name: k-kubelet-probe
-              value: "activator"
           periodSeconds: 10
           failureThreshold: 12
           initialDelaySeconds: 15

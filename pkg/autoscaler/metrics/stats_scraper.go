@@ -24,16 +24,18 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"go.opencensus.io/stats"
-	"go.opencensus.io/stats/view"
-	"go.uber.org/atomic"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
+
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"k8s.io/utils/clock"
 
 	netcfg "knative.dev/networking/pkg/config"
-	pkgmetrics "knative.dev/pkg/metrics"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/metrics"
@@ -71,23 +73,8 @@ var (
 	errDirectScrapingNotAvailable = errors.New("all pod scrapes returned 503 error")
 	errPodsExhausted              = errors.New("pods exhausted")
 
-	scrapeTimeM = stats.Float64(
-		"scrape_time",
-		"Time to scrape metrics in milliseconds",
-		stats.UnitMilliseconds)
+	latencyBounds = []float64{0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10}
 )
-
-func init() {
-	if err := pkgmetrics.RegisterResourceView(
-		&view.View{
-			Description: "The time to scrape metrics in milliseconds",
-			Measure:     scrapeTimeM,
-			Aggregation: view.Distribution(pkgmetrics.Buckets125(1, 100000)...),
-		},
-	); err != nil {
-		panic(err)
-	}
-}
 
 // StatsScraper defines the interface for collecting Revision metrics
 type StatsScraper interface {
@@ -147,49 +134,77 @@ type serviceScraper struct {
 	directClient scrapeClient
 	meshClient   scrapeClient
 
-	host     string
-	url      string
-	statsCtx context.Context
-	logger   *zap.SugaredLogger
+	host   string
+	url    string
+	attrs  attribute.Set
+	logger *zap.SugaredLogger
 
 	podAccessor      resources.PodAccessor
 	usePassthroughLb bool
 	podsAddressable  bool
+
+	duration metric.Float64Histogram
+	clock    clock.Clock
 }
 
 // NewStatsScraper creates a new StatsScraper for the Revision which
 // the given Metric is responsible for.
-func NewStatsScraper(metric *autoscalingv1alpha1.Metric, revisionName string, podAccessor resources.PodAccessor,
-	usePassthroughLb bool, meshMode netcfg.MeshCompatibilityMode, logger *zap.SugaredLogger) StatsScraper {
-	directClient := newHTTPScrapeClient(client)
-	meshClient := newHTTPScrapeClient(noKeepaliveClient)
-	return newServiceScraperWithClient(metric, revisionName, podAccessor, usePassthroughLb, meshMode, directClient, meshClient, logger)
-}
-
-func newServiceScraperWithClient(
+func NewStatsScraper(
 	metric *autoscalingv1alpha1.Metric,
 	revisionName string,
 	podAccessor resources.PodAccessor,
 	usePassthroughLb bool,
 	meshMode netcfg.MeshCompatibilityMode,
-	directClient, meshClient scrapeClient,
-	logger *zap.SugaredLogger) *serviceScraper {
-	svcName := metric.Labels[serving.ServiceLabelKey]
-	cfgName := metric.Labels[serving.ConfigurationLabelKey]
+	logger *zap.SugaredLogger,
+	mp metric.MeterProvider,
+) StatsScraper {
+	directClient := newHTTPScrapeClient(client)
+	meshClient := newHTTPScrapeClient(noKeepaliveClient)
+	return newServiceScraperWithClient(metric, revisionName, podAccessor, usePassthroughLb, meshMode, directClient, meshClient, logger, mp)
+}
 
-	ctx := metrics.RevisionContext(metric.ObjectMeta.Namespace, svcName, cfgName, revisionName)
+func newServiceScraperWithClient(
+	m *autoscalingv1alpha1.Metric,
+	revisionName string,
+	podAccessor resources.PodAccessor,
+	usePassthroughLb bool,
+	meshMode netcfg.MeshCompatibilityMode,
+	directClient, meshClient scrapeClient,
+	logger *zap.SugaredLogger,
+	mp metric.MeterProvider,
+) *serviceScraper {
+	svcName := m.Labels[serving.ServiceLabelKey]
+	cfgName := m.Labels[serving.ConfigurationLabelKey]
+
+	meter := mp.Meter(scopeName)
+	metric, err := meter.Float64Histogram(
+		"kn.autoscaler.scrape.duration",
+		metric.WithDescription("The duration of scraping the revision"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(latencyBounds...),
+	)
+	if err != nil {
+		panic(err)
+	}
 
 	return &serviceScraper{
 		meshMode:         meshMode,
 		directClient:     directClient,
 		meshClient:       meshClient,
-		host:             metric.Spec.ScrapeTarget + "." + metric.ObjectMeta.Namespace,
-		url:              urlFromTarget(metric.Spec.ScrapeTarget, metric.ObjectMeta.Namespace),
+		host:             m.Spec.ScrapeTarget + "." + m.ObjectMeta.Namespace,
+		url:              urlFromTarget(m.Spec.ScrapeTarget, m.ObjectMeta.Namespace),
 		podAccessor:      podAccessor,
 		podsAddressable:  true,
 		usePassthroughLb: usePassthroughLb,
-		statsCtx:         ctx,
 		logger:           logger,
+		clock:            clock.RealClock{},
+		duration:         metric,
+		attrs: attribute.NewSet(
+			semconv.K8SNamespaceName(m.ObjectMeta.Namespace),
+			metrics.ServiceNameKey.With(svcName),
+			metrics.ConfigurationNameKey.With(cfgName),
+			metrics.RevisionNameKey.With(revisionName),
+		),
 	}
 }
 
@@ -202,15 +217,16 @@ func urlFromTarget(t, ns string) string {
 // Scrape calls the destination service then sends it
 // to the given stats channel.
 func (s *serviceScraper) Scrape(window time.Duration) (stat Stat, err error) {
-	startTime := time.Now()
+	startTime := s.clock.Now()
 	defer func() {
 		// No errors and an empty stat? We didn't scrape at all because
 		// we're scaled to 0.
 		if stat == emptyStat && err == nil {
 			return
 		}
-		scrapeTime := time.Since(startTime)
-		pkgmetrics.RecordBatch(s.statsCtx, scrapeTimeM.M(float64(scrapeTime.Milliseconds())))
+		scrapeTime := s.clock.Since(startTime)
+		scrapeTimeSec := float64(scrapeTime / time.Second)
+		s.duration.Record(context.Background(), scrapeTimeSec, metric.WithAttributeSet(s.attrs))
 	}()
 
 	switch s.meshMode {
@@ -276,16 +292,17 @@ func (s *serviceScraper) scrapePods(window time.Duration) (Stat, error) {
 	pods = append(pods, youngPods...)
 
 	grp, egCtx := errgroup.WithContext(context.Background())
-	idx := atomic.NewInt32(-1)
+	var idx atomic.Int32
+	idx.Store(-1)
 	var sawNonMeshError atomic.Bool
 	// Start |sampleSize| threads to scan in parallel.
-	for i := 0; i < sampleSize; i++ {
+	for range sampleSize {
 		grp.Go(func() error {
 			// If a given pod failed to scrape, we want to continue
 			// scanning pods down the line.
 			for {
 				// Acquire next pod.
-				myIdx := int(idx.Inc())
+				myIdx := int(idx.Add(1))
 				// All out?
 				if myIdx >= len(pods) {
 					return errPodsExhausted
@@ -378,7 +395,7 @@ func (s *serviceScraper) scrapeService(window time.Duration) (Stat, error) {
 
 	grp, egCtx := errgroup.WithContext(context.Background())
 	youngPodCutOffSecs := window.Seconds()
-	for i := 0; i < sampleSize; i++ {
+	for range sampleSize {
 		grp.Go(func() error {
 			for tries := 1; ; tries++ {
 				stat, err := s.tryScrape(egCtx, scrapedPods)

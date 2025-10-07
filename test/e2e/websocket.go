@@ -59,14 +59,14 @@ func connect(t *testing.T, clients *test.Clients, domain, timeout string) (*webs
 		}
 	}
 
-	rawQuery := fmt.Sprintf("delay=%s", timeout)
+	rawQuery := "delay=" + timeout
 	u := url.URL{Scheme: "ws", Host: net.JoinHostPort(address, mapper("80")), Path: "/", RawQuery: rawQuery}
 	if test.ServingFlags.HTTPS {
 		u = url.URL{Scheme: "wss", Host: net.JoinHostPort(address, mapper("443")), Path: "/", RawQuery: rawQuery}
 	}
 
 	var conn *websocket.Conn
-	waitErr := wait.PollImmediate(connectRetryInterval, connectTimeout, func() (bool, error) {
+	waitErr := wait.PollUntilContextTimeout(context.Background(), connectRetryInterval, connectTimeout, true, func(context.Context) (bool, error) {
 		t.Logf("Connecting using websocket: url=%s, host=%s", u.String(), domain)
 		dialer := &websocket.Dialer{
 			Proxy:            http.ProxyFromEnvironment,
@@ -77,6 +77,7 @@ func connect(t *testing.T, clients *test.Clients, domain, timeout string) (*webs
 			dialer.TLSClientConfig.ServerName = domain // Set ServerName for pseudo hostname with TLS.
 		}
 
+		//nolint:bodyclose
 		c, resp, err := dialer.Dial(u.String(), http.Header{"Host": {domain}})
 		if err == nil {
 			t.Log("WebSocket connection established.")

@@ -59,13 +59,14 @@ func TestMustNotContainerConstraints(t *testing.T) {
 	}}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			names := test.ResourceNames{
 				Service: test.ObjectNameForTest(t),
 				Image:   test.Runtime,
 			}
+			test.EnsureTearDown(t, clients, &names)
+
 			if svc, err := testv1.CreateService(t, clients, names, tc.options); err == nil {
 				t.Errorf("CreateService = %v, want: error", spew.Sdump(svc))
 			}
@@ -175,13 +176,14 @@ func TestShouldNotContainerConstraints(t *testing.T) {
 	}}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			names := test.ResourceNames{
 				Service: test.ObjectNameForTest(t),
 				Image:   test.Runtime,
 			}
+
+			test.EnsureTearDown(t, clients, &names)
 
 			svc, err := testv1.CreateService(t, clients, names, tc.options)
 			if err == nil && tc.assertIfNoError == nil {

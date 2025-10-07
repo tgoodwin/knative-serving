@@ -54,9 +54,10 @@ var (
 	}
 
 	expectedPorts = []corev1.ServicePort{{
-		Name:       netapi.ServicePortNameH2C,
-		Port:       int32(80),
-		TargetPort: intstr.FromInt(80),
+		Name:        netapi.ServicePortNameH2C,
+		AppProtocol: &netapi.AppProtocolH2C,
+		Port:        int32(80),
+		TargetPort:  intstr.FromInt(80),
 	}}
 )
 
@@ -123,8 +124,9 @@ func TestMakeK8SService(t *testing.T) {
 				IP: "some-ip",
 			}},
 			Ports: []corev1.EndpointPort{{
-				Name: netapi.ServicePortNameH2C,
-				Port: int32(80),
+				Name:        netapi.ServicePortNameH2C,
+				AppProtocol: &netapi.AppProtocolH2C,
+				Port:        int32(80),
 			}},
 		}},
 	}, {
@@ -200,8 +202,9 @@ func TestMakeK8SService(t *testing.T) {
 				IP: "some-ip",
 			}},
 			Ports: []corev1.EndpointPort{{
-				Name: netapi.ServicePortNameH2C,
-				Port: int32(80),
+				Name:        netapi.ServicePortNameH2C,
+				AppProtocol: &netapi.AppProtocolH2C,
+				Port:        int32(80),
 			}},
 		}},
 	}, {
@@ -392,9 +395,10 @@ func TestMakePlaceholderService(t *testing.T) {
 				ExternalName:    tt.expectedExternalName,
 				SessionAffinity: corev1.ServiceAffinityNone,
 				Ports: []corev1.ServicePort{{
-					Name:       netapi.ServicePortNameH2C,
-					Port:       int32(80),
-					TargetPort: intstr.FromInt(80),
+					Name:        netapi.ServicePortNameH2C,
+					AppProtocol: &netapi.AppProtocolH2C,
+					Port:        int32(80),
+					TargetPort:  intstr.FromInt(80),
 				}},
 			}
 
@@ -408,10 +412,10 @@ func TestMakePlaceholderService(t *testing.T) {
 func testConfig() *config.Config {
 	return &config.Config{
 		Domain: &config.Domain{
-			Domains: map[string]*config.LabelSelector{
+			Domains: map[string]config.DomainConfig{
 				"example.com": {},
 				"another-example.com": {
-					Selector: map[string]string{"app": "prod"},
+					Selector: &config.LabelSelector{Selector: map[string]string{"app": "prod"}},
 				},
 			},
 		},
@@ -419,23 +423,25 @@ func testConfig() *config.Config {
 			DefaultIngressClass: "test-ingress-class",
 			DomainTemplate:      netcfg.DefaultDomainTemplate,
 			TagTemplate:         netcfg.DefaultTagTemplate,
-			DataplaneTrust:      netcfg.TrustDisabled,
+			SystemInternalTLS:   netcfg.EncryptionDisabled,
 		},
 		Features: &apiConfig.Features{
-			MultiContainer:               apiConfig.Disabled,
-			PodSpecAffinity:              apiConfig.Disabled,
-			PodSpecFieldRef:              apiConfig.Disabled,
-			PodSpecDryRun:                apiConfig.Enabled,
-			PodSpecHostAliases:           apiConfig.Disabled,
-			PodSpecNodeSelector:          apiConfig.Disabled,
-			PodSpecTolerations:           apiConfig.Disabled,
-			PodSpecVolumesEmptyDir:       apiConfig.Disabled,
-			PodSpecPersistentVolumeClaim: apiConfig.Disabled,
-			PodSpecPersistentVolumeWrite: apiConfig.Disabled,
-			PodSpecInitContainers:        apiConfig.Disabled,
-			PodSpecPriorityClassName:     apiConfig.Disabled,
-			PodSpecSchedulerName:         apiConfig.Disabled,
-			TagHeaderBasedRouting:        apiConfig.Disabled,
+			MultiContainer:                 apiConfig.Disabled,
+			PodSpecAffinity:                apiConfig.Disabled,
+			PodSpecFieldRef:                apiConfig.Disabled,
+			PodSpecHostAliases:             apiConfig.Disabled,
+			PodSpecNodeSelector:            apiConfig.Disabled,
+			PodSpecTolerations:             apiConfig.Disabled,
+			PodSpecVolumesEmptyDir:         apiConfig.Disabled,
+			PodSpecVolumesHostPath:         apiConfig.Disabled,
+			PodSpecPersistentVolumeClaim:   apiConfig.Disabled,
+			PodSpecPersistentVolumeWrite:   apiConfig.Disabled,
+			PodSpecVolumesMountPropagation: apiConfig.Disabled,
+			PodSpecVolumesCSI:              apiConfig.Disabled,
+			PodSpecInitContainers:          apiConfig.Disabled,
+			PodSpecPriorityClassName:       apiConfig.Disabled,
+			PodSpecSchedulerName:           apiConfig.Disabled,
+			TagHeaderBasedRouting:          apiConfig.Disabled,
 		},
 	}
 }

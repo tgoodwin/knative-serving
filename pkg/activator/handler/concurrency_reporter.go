@@ -21,16 +21,16 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"go.uber.org/atomic"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/types"
 	netstats "knative.dev/networking/pkg/http/stats"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/logging/logkey"
-	pkgmetrics "knative.dev/pkg/metrics"
-	"knative.dev/serving/pkg/activator"
 	"knative.dev/serving/pkg/apis/serving"
 	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
 	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision"
@@ -64,18 +64,26 @@ type ConcurrencyReporter struct {
 	mux sync.RWMutex
 	// This map holds the concurrency and request count accounting across revisions.
 	stats map[types.NamespacedName]*revisionStats
+
+	metrics *ccMetrics
 }
 
 // NewConcurrencyReporter creates a ConcurrencyReporter which listens to incoming
 // ReqEvents on reqCh and ticks on reportCh and reports stats on statCh.
-func NewConcurrencyReporter(ctx context.Context, podName string, statCh chan []asmetrics.StatMessage) *ConcurrencyReporter {
+func NewConcurrencyReporter(
+	ctx context.Context,
+	podName string,
+	statCh chan []asmetrics.StatMessage,
+	mp metric.MeterProvider,
+) *ConcurrencyReporter {
 	return &ConcurrencyReporter{
 		logger:  logging.FromContext(ctx),
 		podName: podName,
 		statCh:  statCh,
 		rl:      revisioninformer.Get(ctx).Lister(),
 
-		stats: make(map[types.NamespacedName]*revisionStats),
+		stats:   make(map[types.NamespacedName]*revisionStats),
+		metrics: newMetrics(mp),
 	}
 }
 
@@ -94,7 +102,7 @@ func (cr *ConcurrencyReporter) handleRequestIn(event netstats.ReqEvent) *revisio
 // the handleRequestIn call.
 func (cr *ConcurrencyReporter) handleRequestOut(stat *revisionStats, event netstats.ReqEvent) {
 	stat.stats.HandleEvent(event)
-	stat.refs.Dec()
+	stat.refs.Add(-1)
 }
 
 // getOrCreateStat gets a stat from the state if present.
@@ -106,7 +114,7 @@ func (cr *ConcurrencyReporter) getOrCreateStat(event netstats.ReqEvent) (*revisi
 	if stat != nil {
 		// Since this is incremented under the lock, it's guaranteed to be observed by
 		// the deletion routine.
-		stat.refs.Inc()
+		stat.refs.Add(1)
 		cr.mux.RUnlock()
 		return stat, nil
 	}
@@ -120,7 +128,7 @@ func (cr *ConcurrencyReporter) getOrCreateStat(event netstats.ReqEvent) (*revisi
 	if stat != nil {
 		// Since this is incremented under the lock, it's guaranteed to be observed by
 		// the deletion routine.
-		stat.refs.Inc()
+		stat.refs.Add(1)
 		return stat, nil
 	}
 
@@ -128,7 +136,7 @@ func (cr *ConcurrencyReporter) getOrCreateStat(event netstats.ReqEvent) (*revisi
 		stats:        netstats.NewRequestStats(event.Time),
 		firstRequest: 1,
 	}
-	stat.refs.Inc()
+	stat.refs.Add(1)
 	cr.stats[event.Key] = stat
 
 	return stat, &asmetrics.StatMessage{
@@ -208,11 +216,20 @@ func (cr *ConcurrencyReporter) reportToMetricsBackend(key types.NamespacedName, 
 		cr.logger.Errorw("Error while getting revision", zap.String(logkey.Key, key.String()), zap.Error(err))
 		return
 	}
+
 	configurationName := revision.Labels[serving.ConfigurationLabelKey]
 	serviceName := revision.Labels[serving.ServiceLabelKey]
 
-	reporterCtx, _ := metrics.PodRevisionContext(cr.podName, activator.Name, ns, serviceName, configurationName, revName)
-	pkgmetrics.Record(reporterCtx, requestConcurrencyM.M(concurrency))
+	cr.metrics.requestCC.Record(
+		context.Background(),
+		concurrency,
+		metric.WithAttributeSet(attribute.NewSet(
+			metrics.ServiceNameKey.With(serviceName),
+			metrics.ConfigurationNameKey.With(configurationName),
+			metrics.RevisionNameKey.With(revName),
+			metrics.K8sNamespaceKey.With(ns),
+		)),
+	)
 }
 
 // Run runs until stopCh is closed and processes events on all incoming channels.

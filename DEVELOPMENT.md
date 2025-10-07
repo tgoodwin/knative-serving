@@ -23,18 +23,6 @@ Start by creating [a GitHub account](https://github.com/join), then set up
 
 ### Install requirements
 
-#### Getting started with GitHub Codespaces
-
-To get started, create a codespace for this repository by clicking this 👇
-
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?hide_repo_select=true&ref=main&repo=118828329)
-
-A codespace will open in a web-based version of Visual Studio Code. The [dev container](.devcontainer/devcontainer.json) is fully configured with software needed for this project. It creates a local container registry, a Kind cluster and deploys Knative Serving and Knative Ingress. If you use a codespace, then you can directly skip to the [Iterating](#Iterating) section of this document.
-
-**Note**: Dev containers is an open spec which is supported by [GitHub Codespaces](https://github.com/codespaces) and [other tools](https://containers.dev/supporting).
-
-#### Local Setup
-
 You must install these tools:
 
 1. [`go`](https://golang.org/doc/install): The language `Knative Serving` is
@@ -67,7 +55,8 @@ If you're working on and changing `.proto` files:
    - If developing locally with Docker or Minikube, you can set
      `KO_DOCKER_REPO=ko.local` (preferred) or use the `-L` flag to `ko` to build
      and push locally (in this case, authentication is not needed). If
-     developing with kind you can set `KO_DOCKER_REPO=kind.local`.
+     developing with Kind you can set `KO_DOCKER_REPO=kind.local`.
+   - If you encounter an `ImagePullBackOff` error while using Minikube or Kind, it may be due to the cluster's inability to pull locally built images because of image pull policies. To resolve this issue, consider enabling the local registry: for [Minikube](https://minikube.sigs.k8s.io/docs/handbook/registry) or for [Kind](https://kind.sigs.k8s.io/docs/user/local-registry/).
 
 **Note**: You'll need to be authenticated with your `KO_DOCKER_REPO` before
 pushing images. Run `gcloud auth configure-docker` if you are using Google
@@ -152,10 +141,22 @@ Kubernetes cluster in your designated environment, if necessary.
 
 ### Deploy Knative Serving
 
-This step includes building Knative Serving, creating and pushing developer
-images, and deploying them to your Kubernetes cluster. If you're developing
-locally, set `KO_DOCKER_REPO=ko.local` (or `KO_DOCKER_REPO=kind.local` respectively)
-to avoid needing to push your images to an off-machine registry.
+- This step includes building Knative Serving, creating and pushing developer
+  images, and deploying them to your Kubernetes cluster. If you're developing
+  locally, set `KO_DOCKER_REPO=ko.local` (or `KO_DOCKER_REPO=kind.local` respectively)
+  to avoid needing to push your images to an off-machine registry.
+
+- By default, `ko` will build container images for the architecture of your local machine, 
+  but if you need to build images for a different platform (OS and architecture), 
+  you can provide `--platform` flag as follows: 
+
+  ```shell
+  # Synopsis
+  ko apply -f FILENAME [flags]
+
+  # Usage
+  ko apply --selector knative.dev/crd-install=true -Rf config/core/ --platform linux/arm64
+  ```
 
 Run:
 
@@ -242,10 +243,15 @@ of:
 - **If you change surface area of `PodSpec` that we allow in our resources** then you must update
   the relevant section of [`./hack/schemapatch-config.yaml`](./hack/schemapatch-config.yaml)
   and run [`./hack/update-schemas.sh`](./hack/update-schemas.sh) Additionally:
-  - If the new field is added _without feature-gating_, then it must be added to the
-    `allowedFields` list.
-  - If the new field is added _behind a feature flag_, then set `preserveUnknownFields:
-    true # for feature flagged fields` on its parent type. Do **not** add it to `allowedFields`.
+
+  - If the new field is added _behind a feature flag_, then add the `kubebuilder:validation:DropProperties` and `kubebuilder:pruning:PreserveUnknownFields` as `additionalMarkers`.
+
+    ```yaml
+    additionalMarkers:
+    # Part of a feature flag - so we want to omit the schema and preserve unknown fields
+    - kubebuilder:validation:DropProperties
+    - kubebuilder:pruning:PreserveUnknownFields
+    ```
 
 These are all idempotent, and we expect that running these at `HEAD` to have no
 diffs. Code generation and dependencies are automatically checked to produce no

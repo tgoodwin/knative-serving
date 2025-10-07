@@ -25,7 +25,6 @@ import (
 	"knative.dev/pkg/injection/sharedmain"
 	"knative.dev/pkg/leaderelection"
 	"knative.dev/pkg/logging"
-	"knative.dev/pkg/metrics"
 	"knative.dev/pkg/signals"
 	"knative.dev/pkg/webhook"
 	"knative.dev/pkg/webhook/certificates"
@@ -34,6 +33,8 @@ import (
 	"knative.dev/pkg/webhook/resourcesemantics/defaulting"
 	"knative.dev/pkg/webhook/resourcesemantics/validation"
 	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
+	o11yconfigmap "knative.dev/serving/pkg/observability/configmap"
+	certconfig "knative.dev/serving/pkg/reconciler/certificate/config"
 
 	// resource validation types
 	net "knative.dev/networking/pkg/apis/networking/v1alpha1"
@@ -44,7 +45,6 @@ import (
 	// config validation constructors
 	network "knative.dev/networking/pkg"
 	netcfg "knative.dev/networking/pkg/config"
-	tracingconfig "knative.dev/pkg/tracing/config"
 	apisconfig "knative.dev/serving/pkg/apis/config"
 	autoscalerconfig "knative.dev/serving/pkg/autoscaler/config"
 	"knative.dev/serving/pkg/deployment"
@@ -143,17 +143,17 @@ func newConfigValidationController(ctx context.Context, cmw configmap.Watcher) *
 
 		// The configmaps to validate.
 		configmap.Constructors{
-			tracingconfig.ConfigName:       tracingconfig.NewTracingConfigFromConfigMap,
-			autoscalerconfig.ConfigName:    autoscalerconfig.NewConfigFromConfigMap,
-			gc.ConfigName:                  gc.NewConfigFromConfigMapFunc(ctx),
-			netcfg.ConfigMapName:           network.NewConfigFromConfigMap,
-			deployment.ConfigName:          deployment.NewConfigFromConfigMap,
-			apisconfig.FeaturesConfigName:  apisconfig.NewFeaturesConfigFromConfigMap,
-			metrics.ConfigMapName():        metrics.NewObservabilityConfigFromConfigMap,
-			logging.ConfigMapName():        logging.NewConfigFromConfigMap,
-			leaderelection.ConfigMapName(): leaderelection.NewConfigFromConfigMap,
-			domainconfig.DomainConfigName:  domainconfig.NewDomainFromConfigMap,
-			apisconfig.DefaultsConfigName:  apisconfig.NewDefaultsConfigFromConfigMap,
+			autoscalerconfig.ConfigName:      autoscalerconfig.NewConfigFromConfigMap,
+			gc.ConfigName:                    gc.NewConfigFromConfigMapFunc(ctx),
+			netcfg.ConfigMapName:             network.NewConfigFromConfigMap,
+			deployment.ConfigName:            deployment.NewConfigFromConfigMap,
+			apisconfig.FeaturesConfigName:    apisconfig.NewFeaturesConfigFromConfigMap,
+			o11yconfigmap.Name():             o11yconfigmap.Parse,
+			logging.ConfigMapName():          logging.NewConfigFromConfigMap,
+			leaderelection.ConfigMapName():   leaderelection.NewConfigFromConfigMap,
+			domainconfig.DomainConfigName:    domainconfig.NewDomainFromConfigMap,
+			apisconfig.DefaultsConfigName:    apisconfig.NewDefaultsConfigFromConfigMap,
+			certconfig.CertManagerConfigName: certconfig.NewCertManagerConfigFromConfigMap,
 		},
 	)
 }

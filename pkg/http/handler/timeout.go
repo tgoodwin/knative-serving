@@ -138,9 +138,11 @@ func (h *timeoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			idleTimeout.Reset(timeToNextTimeout)
 		case <-responseStartTimeoutCh:
+			// If the response has already started, we need to continue
+			// processing other timeouts and wait for the handler to complete.
+			responseStartTimeoutDrained = true
 			timedOut := tw.tryResponseStartTimeoutAndWriteError(h.body)
 			if timedOut {
-				responseStartTimeoutDrained = true
 				return
 			}
 		}
@@ -163,8 +165,15 @@ type timeoutWriter struct {
 	lastWriteTime time.Time
 }
 
-var _ http.Flusher = (*timeoutWriter)(nil)
-var _ http.ResponseWriter = (*timeoutWriter)(nil)
+var (
+	_ http.Flusher        = (*timeoutWriter)(nil)
+	_ http.ResponseWriter = (*timeoutWriter)(nil)
+)
+
+// Unwrap returns the underlying writer
+func (tw *timeoutWriter) Unwrap() http.ResponseWriter {
+	return tw.w
+}
 
 func (tw *timeoutWriter) Flush() {
 	// The inner handler of timeoutHandler can call Flush at any time including after
@@ -209,9 +218,8 @@ func (tw *timeoutWriter) WriteHeader(code int) {
 	tw.w.WriteHeader(code)
 }
 
-// tryTimeoutAndWriteError writes an error to the responsewriter if
-// nothing has been written to the writer before. Returns whether
-// an error was written or not.
+// tryTimeoutAndWriteError writes an error to the responsewriter if it hasn't
+// been written to the writer before. Returns whether an error was written or not.
 //
 // If this writes an error, all subsequent calls to Write will
 // result in http.ErrHandlerTimeout.
@@ -219,7 +227,7 @@ func (tw *timeoutWriter) tryTimeoutAndWriteError(msg string) bool {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	if tw.lastWriteTime.IsZero() {
+	if !tw.timedOut {
 		tw.timeoutAndWriteError(msg)
 		return true
 	}

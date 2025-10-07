@@ -21,6 +21,7 @@ package v1
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -71,7 +72,7 @@ func TestServiceCreateListAndDelete(t *testing.T) {
 	if len(list.Items) < 1 {
 		t.Fatal("Listing should return at least one Service")
 	}
-	var serviceFound = false
+	serviceFound := false
 	for _, service := range list.Items {
 		t.Logf("Service Returned: %s", service.Name)
 		if service.Name == names.Service {
@@ -85,7 +86,6 @@ func TestServiceCreateListAndDelete(t *testing.T) {
 	if err := v1test.DeleteService(clients, names.Service); err != nil {
 		t.Fatal("Error deleting Service")
 	}
-
 }
 
 // TestServiceCreateAndUpdate tests both Creation and Update paths for a service. The test performs a series of Update/Validate steps to ensure that
@@ -619,6 +619,9 @@ func TestAnnotationPropagation(t *testing.T) {
 	if err := validateAnnotations(objects); err != nil {
 		t.Error("Annotations are incorrect:", err)
 	}
+	if err := validateK8sServiceAnnotations(t, clients, names); err != nil {
+		t.Error(err)
+	}
 
 	if objects.Service, err = v1test.UpdateService(t, clients, names,
 		rtesting.WithServiceAnnotation("juicy", "jamba")); err != nil {
@@ -651,6 +654,9 @@ func TestAnnotationPropagation(t *testing.T) {
 	// Now we can validate the annotations.
 	if err := validateAnnotations(objects, "juicy"); err != nil {
 		t.Error("Annotations are incorrect:", err)
+	}
+	if err := validateK8sServiceAnnotations(t, clients, names, "juicy"); err != nil {
+		t.Error(err)
 	}
 
 	if objects.Service, err = v1test.UpdateService(t, clients, names,
@@ -685,11 +691,19 @@ func TestAnnotationPropagation(t *testing.T) {
 	if err := validateAnnotations(objects); err != nil {
 		t.Error("Annotations are incorrect:", err)
 	}
+	if err := validateK8sServiceAnnotations(t, clients, names, "juicy"); err != nil {
+		t.Error(err)
+	}
 	if _, ok := objects.Config.Annotations["juicy"]; ok {
 		t.Error("Config still has `juicy` annotation")
 	}
 	if _, ok := objects.Route.Annotations["juicy"]; ok {
 		t.Error("Route still has `juicy` annotation")
+	}
+	if err := validateK8sServiceAnnotations(t, clients, names, "juicy"); err != nil {
+		if !strings.Contains(err.Error(), "was empty") {
+			t.Error(err)
+		}
 	}
 }
 
@@ -720,9 +734,19 @@ func TestServiceCreateWithMultipleContainers(t *testing.T) {
 		Ports: []corev1.ContainerPort{{
 			ContainerPort: 8881,
 		}},
+		Env: []corev1.EnvVar{
+			{Name: "FORWARD_PORT", Value: "8882"},
+		},
 	}, {
 		Image: pkgtest.ImagePath(names.Sidecars[0]),
 	}}
+
+	// Please see the comment in test/v1/configuration.go.
+	if !test.ServingFlags.DisableOptionalAPI {
+		for _, c := range containers {
+			c.ImagePullPolicy = corev1.PullIfNotPresent
+		}
+	}
 
 	// Setup initial Service
 	if _, err := v1test.CreateServiceReady(t, clients, &names, func(svc *v1.Service) {
@@ -738,6 +762,126 @@ func TestServiceCreateWithMultipleContainers(t *testing.T) {
 
 	if err := validateDataPlane(t, clients, names, test.MultiContainerResponse); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestLabelPropagation(t *testing.T) {
+	t.Parallel()
+	clients := test.Setup(t)
+
+	names := test.ResourceNames{
+		Service: test.ObjectNameForTest(t),
+		Image:   test.PizzaPlanet1,
+	}
+
+	// Clean up on test failure or interrupt
+	test.EnsureTearDown(t, clients, &names)
+
+	// Setup initial Service
+	objects, err := v1test.CreateServiceReady(t, clients, &names)
+	if err != nil {
+		t.Fatalf("Failed to create initial Service %v: %v", names.Service, err)
+	}
+
+	// Validate State after Creation
+	if err = validateControlPlane(t, clients, names, "1"); err != nil {
+		t.Error(err)
+	}
+
+	// Validate State after Creation
+
+	if err = validateControlPlane(t, clients, names, "1"); err != nil {
+		t.Error(err)
+	}
+
+	if err := validateLabelsPropagation(t, *objects, names); err != nil {
+		t.Error(err)
+	}
+	if err := validateK8sServiceLabels(t, clients, names); err != nil {
+		t.Error(err)
+	}
+
+	if objects.Service, err = v1test.UpdateService(t, clients, names,
+		rtesting.WithServiceLabel("juicy", "jamba")); err != nil {
+		t.Fatalf("Service %s was not updated with new annotation: %v", names.Service, err)
+	}
+
+	// Trigger new Revision generation
+	t.Log("Updating the Service to use a different image.")
+	image2 := pkgtest.ImagePath(test.PizzaPlanet2)
+	if objects.Service, err = v1test.UpdateService(t, clients, names, rtesting.WithServiceImage(image2)); err != nil {
+		t.Fatalf("Update for Service %s with new image %s failed: %v", names.Service, image2, err)
+	}
+	t.Log("Service should reflect new revision created and ready in status.")
+	names.Revision, err = v1test.WaitForServiceLatestRevision(clients, names)
+	if err != nil {
+		t.Fatal("New image not reflected in Service:", err)
+	}
+	t.Log("Waiting for Service to transition to Ready.")
+	if err := v1test.WaitForServiceState(clients.ServingClient, names.Service, v1test.IsServiceReady, "ServiceIsReady"); err != nil {
+		t.Fatal("Error waiting for the service to become ready for the latest revision:", err)
+	}
+	objects, err = v1test.GetResourceObjects(clients, names)
+	if err != nil {
+		t.Error("Error getting objects:", err)
+	}
+
+	// Validate updated labels
+	if err := validateLabelsPropagation(t, *objects, names); err != nil {
+		t.Error("Annotations are incorrect:", err)
+	}
+	if _, ok := objects.Config.Labels["juicy"]; !ok {
+		t.Error("Config missing `juicy` label")
+	}
+	if _, ok := objects.Route.Labels["juicy"]; !ok {
+		t.Error("Route missing `juicy` label")
+	}
+	if err := validateK8sServiceLabels(t, clients, names, "juicy"); err != nil {
+		t.Error(err)
+	}
+
+	if objects.Service, err = v1test.UpdateService(t, clients, names,
+		rtesting.WithServiceLabelRemoved("juicy")); err != nil {
+		t.Fatalf("Service %s was not updated with annotation deleted: %v", names.Service, err)
+	}
+
+	// Trigger new Revision generation
+	t.Log("Updating the Service to use a different image.")
+	image3 := pkgtest.ImagePath(test.HelloWorld)
+	if objects.Service, err = v1test.UpdateService(t, clients, names, rtesting.WithServiceImage(image3)); err != nil {
+		t.Fatalf("Update for Service %s with new image %s failed: %v", names.Service, image3, err)
+	}
+	t.Log("Service should reflect new revision created and ready in status.")
+	names.Revision, err = v1test.WaitForServiceLatestRevision(clients, names)
+	if err != nil {
+		t.Fatal("New image not reflected in Service:", err)
+	}
+	t.Log("Waiting for Service to transition to Ready.")
+	if err := v1test.WaitForServiceState(clients.ServingClient, names.Service, v1test.IsServiceReady, "ServiceIsReady"); err != nil {
+		t.Fatal("Error waiting for the service to become ready for the latest revision:", err)
+	}
+	objects, err = v1test.GetResourceObjects(clients, names)
+	if err != nil {
+		t.Error("Error getting objects:", err)
+	}
+
+	// Now we can validate the annotations.
+	if err := validateLabelsPropagation(t, *objects, names); err != nil {
+		t.Error(err)
+	}
+	if err := validateK8sServiceLabels(t, clients, names, "juicy"); err != nil {
+		t.Error(err)
+	}
+	if _, ok := objects.Config.Labels["juicy"]; ok {
+		t.Error("Config still has `juicy` annotation")
+	}
+	if _, ok := objects.Route.Labels["juicy"]; ok {
+		t.Error("Route still has `juicy` annotation")
+	}
+	if err := validateK8sServiceLabels(t, clients, names, "juicy"); err != nil {
+		if !strings.Contains(err.Error(), "was empty") {
+			t.Error(err)
+		}
 	}
 }
 

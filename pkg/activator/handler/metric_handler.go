@@ -18,17 +18,15 @@ package handler
 
 import (
 	"net/http"
-	"time"
 
-	pkgmetrics "knative.dev/pkg/metrics"
-	"knative.dev/serving/pkg/activator"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"knative.dev/serving/pkg/apis/serving"
-	pkghttp "knative.dev/serving/pkg/http"
 	"knative.dev/serving/pkg/metrics"
 )
 
-// NewMetricHandler creates a handler that collects and reports request metrics.
-func NewMetricHandler(podName string, next http.Handler) *MetricHandler {
+// NewMetricAttributeHandler creates a handler that adds serving attributes
+// to the otelhttp labeler
+func NewMetricAttributeHandler(podName string, next http.Handler) *MetricHandler {
 	return &MetricHandler{
 		nextHandler: next,
 		podName:     podName,
@@ -43,23 +41,18 @@ type MetricHandler struct {
 
 func (h *MetricHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rev := RevisionFrom(r.Context())
-	reporterCtx, _ := metrics.PodRevisionContext(h.podName, activator.Name,
-		rev.Namespace, rev.Labels[serving.ServiceLabelKey], rev.Labels[serving.ConfigurationLabelKey], rev.Name)
 
-	start := time.Now()
+	serviceName := rev.Labels[serving.ServiceLabelKey]
+	configurationName := rev.Labels[serving.ConfigurationLabelKey]
 
-	rr := pkghttp.NewResponseRecorder(w, http.StatusOK)
-	defer func() {
-		err := recover()
-		latency := time.Since(start)
-		if err != nil {
-			reporterCtx := metrics.AugmentWithResponse(reporterCtx, http.StatusInternalServerError)
-			pkgmetrics.RecordBatch(reporterCtx, responseTimeInMsecM.M(float64(latency.Milliseconds())), requestCountM.M(1))
-			panic(err)
-		}
-		reporterCtx := metrics.AugmentWithResponse(reporterCtx, rr.ResponseCode)
-		pkgmetrics.RecordBatch(reporterCtx, responseTimeInMsecM.M(float64(latency.Milliseconds())), requestCountM.M(1))
-	}()
+	// otelhttp middleware creates the labeler
+	labeler, _ := otelhttp.LabelerFromContext(r.Context())
+	labeler.Add(
+		metrics.ServiceNameKey.With(serviceName),
+		metrics.ConfigurationNameKey.With(configurationName),
+		metrics.RevisionNameKey.With(rev.Name),
+		metrics.K8sNamespaceKey.With(rev.Namespace),
+	)
 
-	h.nextHandler.ServeHTTP(rr, r)
+	h.nextHandler.ServeHTTP(w, r)
 }

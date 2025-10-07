@@ -206,6 +206,7 @@ func TestValidateObjectMetadata(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if c.ctx == nil {
+				//nolint:fatcontext
 				c.ctx = config.ToContext(context.Background(), &config.Config{Autoscaler: &autoscalerconfig.Config{AllowZeroInitialScale: false}})
 			}
 			err := ValidateObjectMetadata(c.ctx, c.objectMeta, c.allowAutoscaling)

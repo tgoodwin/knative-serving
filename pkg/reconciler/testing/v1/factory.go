@@ -57,7 +57,8 @@ type Ctor func(context.Context, *Listers, configmap.Watcher) controller.Reconcil
 // MakeFactory creates a reconciler factory with fake clients and controller created by `ctor`.
 func MakeFactory(ctor Ctor) rtesting.Factory {
 	return func(t *testing.T, r *rtesting.TableRow) (
-		controller.Reconciler, rtesting.ActionRecorderList, rtesting.EventList) {
+		controller.Reconciler, rtesting.ActionRecorderList, rtesting.EventList,
+	) {
 		ls := NewListers(r.Objects)
 
 		ctx := r.Ctx
@@ -202,5 +203,4 @@ func AssertTrackingObject(gvk schema.GroupVersionKind, namespace, name string) f
 
 		t.Errorf("Object was not tracked - %s, Name=%s, Namespace=%s", gvk.String(), name, namespace)
 	}
-
 }

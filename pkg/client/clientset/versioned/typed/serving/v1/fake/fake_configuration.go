@@ -19,124 +19,32 @@ limitations under the License.
 package fake
 
 import (
-	"context"
-
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
-	types "k8s.io/apimachinery/pkg/types"
-	watch "k8s.io/apimachinery/pkg/watch"
-	testing "k8s.io/client-go/testing"
-	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	gentype "k8s.io/client-go/gentype"
+	v1 "knative.dev/serving/pkg/apis/serving/v1"
+	servingv1 "knative.dev/serving/pkg/client/clientset/versioned/typed/serving/v1"
 )
 
-// FakeConfigurations implements ConfigurationInterface
-type FakeConfigurations struct {
+// fakeConfigurations implements ConfigurationInterface
+type fakeConfigurations struct {
+	*gentype.FakeClientWithList[*v1.Configuration, *v1.ConfigurationList]
 	Fake *FakeServingV1
-	ns   string
 }
 
-var configurationsResource = schema.GroupVersionResource{Group: "serving.knative.dev", Version: "v1", Resource: "configurations"}
-
-var configurationsKind = schema.GroupVersionKind{Group: "serving.knative.dev", Version: "v1", Kind: "Configuration"}
-
-// Get takes name of the configuration, and returns the corresponding configuration object, and an error if there is any.
-func (c *FakeConfigurations) Get(ctx context.Context, name string, options v1.GetOptions) (result *servingv1.Configuration, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewGetAction(configurationsResource, c.ns, name), &servingv1.Configuration{})
-
-	if obj == nil {
-		return nil, err
+func newFakeConfigurations(fake *FakeServingV1, namespace string) servingv1.ConfigurationInterface {
+	return &fakeConfigurations{
+		gentype.NewFakeClientWithList[*v1.Configuration, *v1.ConfigurationList](
+			fake.Fake,
+			namespace,
+			v1.SchemeGroupVersion.WithResource("configurations"),
+			v1.SchemeGroupVersion.WithKind("Configuration"),
+			func() *v1.Configuration { return &v1.Configuration{} },
+			func() *v1.ConfigurationList { return &v1.ConfigurationList{} },
+			func(dst, src *v1.ConfigurationList) { dst.ListMeta = src.ListMeta },
+			func(list *v1.ConfigurationList) []*v1.Configuration { return gentype.ToPointerSlice(list.Items) },
+			func(list *v1.ConfigurationList, items []*v1.Configuration) {
+				list.Items = gentype.FromPointerSlice(items)
+			},
+		),
+		fake,
 	}
-	return obj.(*servingv1.Configuration), err
-}
-
-// List takes label and field selectors, and returns the list of Configurations that match those selectors.
-func (c *FakeConfigurations) List(ctx context.Context, opts v1.ListOptions) (result *servingv1.ConfigurationList, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewListAction(configurationsResource, configurationsKind, c.ns, opts), &servingv1.ConfigurationList{})
-
-	if obj == nil {
-		return nil, err
-	}
-
-	label, _, _ := testing.ExtractFromListOptions(opts)
-	if label == nil {
-		label = labels.Everything()
-	}
-	list := &servingv1.ConfigurationList{ListMeta: obj.(*servingv1.ConfigurationList).ListMeta}
-	for _, item := range obj.(*servingv1.ConfigurationList).Items {
-		if label.Matches(labels.Set(item.Labels)) {
-			list.Items = append(list.Items, item)
-		}
-	}
-	return list, err
-}
-
-// Watch returns a watch.Interface that watches the requested configurations.
-func (c *FakeConfigurations) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
-	return c.Fake.
-		InvokesWatch(testing.NewWatchAction(configurationsResource, c.ns, opts))
-
-}
-
-// Create takes the representation of a configuration and creates it.  Returns the server's representation of the configuration, and an error, if there is any.
-func (c *FakeConfigurations) Create(ctx context.Context, configuration *servingv1.Configuration, opts v1.CreateOptions) (result *servingv1.Configuration, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewCreateAction(configurationsResource, c.ns, configuration), &servingv1.Configuration{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*servingv1.Configuration), err
-}
-
-// Update takes the representation of a configuration and updates it. Returns the server's representation of the configuration, and an error, if there is any.
-func (c *FakeConfigurations) Update(ctx context.Context, configuration *servingv1.Configuration, opts v1.UpdateOptions) (result *servingv1.Configuration, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewUpdateAction(configurationsResource, c.ns, configuration), &servingv1.Configuration{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*servingv1.Configuration), err
-}
-
-// UpdateStatus was generated because the type contains a Status member.
-// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-func (c *FakeConfigurations) UpdateStatus(ctx context.Context, configuration *servingv1.Configuration, opts v1.UpdateOptions) (*servingv1.Configuration, error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewUpdateSubresourceAction(configurationsResource, "status", c.ns, configuration), &servingv1.Configuration{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*servingv1.Configuration), err
-}
-
-// Delete takes name of the configuration and deletes it. Returns an error if one occurs.
-func (c *FakeConfigurations) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
-	_, err := c.Fake.
-		Invokes(testing.NewDeleteActionWithOptions(configurationsResource, c.ns, name, opts), &servingv1.Configuration{})
-
-	return err
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *FakeConfigurations) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
-	action := testing.NewDeleteCollectionAction(configurationsResource, c.ns, listOpts)
-
-	_, err := c.Fake.Invokes(action, &servingv1.ConfigurationList{})
-	return err
-}
-
-// Patch applies the patch and returns the patched configuration.
-func (c *FakeConfigurations) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *servingv1.Configuration, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(configurationsResource, c.ns, name, pt, data, subresources...), &servingv1.Configuration{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*servingv1.Configuration), err
 }

@@ -19,6 +19,7 @@ package net
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -275,7 +276,7 @@ func TestThrottlerCalculateCapacity(t *testing.T) {
 
 func makeTrackers(num, cc int) []*podTracker {
 	x := make([]*podTracker, num)
-	for i := 0; i < num; i++ {
+	for i := range num {
 		x[i] = newPodTracker(strconv.Itoa(i), nil)
 		if cc > 0 {
 			x[i].b = queue.NewBreaker(queue.BreakerParams{
@@ -310,17 +311,17 @@ func TestThrottlerErrorNoRevision(t *testing.T) {
 	throttler := newTestThrottler(ctx)
 	throttler.handleUpdate(revisionDestsUpdate{
 		Rev:   revID,
-		Dests: sets.NewString("128.0.0.1:1234"),
+		Dests: sets.New("128.0.0.1:1234"),
 	})
 
 	// Make sure it now works.
-	if err := throttler.Try(ctx, revID, func(string) error { return nil }); err != nil {
+	if err := throttler.Try(ctx, revID, func(string, bool) error { return nil }); err != nil {
 		t.Fatalf("Try() = %v, want no error", err)
 	}
 
 	// Make sure errors are propagated correctly.
 	innerError := errors.New("inner")
-	if err := throttler.Try(ctx, revID, func(string) error { return innerError }); !errors.Is(err, innerError) {
+	if err := throttler.Try(ctx, revID, func(string, bool) error { return innerError }); !errors.Is(err, innerError) {
 		t.Fatalf("Try() = %v, want %v", err, innerError)
 	}
 
@@ -329,8 +330,8 @@ func TestThrottlerErrorNoRevision(t *testing.T) {
 
 	// Eventually it should now fail.
 	var lastError error
-	wait.PollInfinite(10*time.Millisecond, func() (bool, error) {
-		lastError = throttler.Try(ctx, revID, func(string) error { return nil })
+	wait.PollUntilContextCancel(ctx, 10*time.Millisecond, false, func(context.Context) (bool, error) {
+		lastError = throttler.Try(ctx, revID, func(string, bool) error { return nil })
 		return lastError != nil, nil
 	})
 	if lastError == nil || lastError.Error() != `revision.serving.knative.dev "test-revision" not found` {
@@ -361,7 +362,7 @@ func TestThrottlerErrorOneTimesOut(t *testing.T) {
 	throttler.handleUpdate(revisionDestsUpdate{
 		Rev:           revID,
 		ClusterIPDest: "129.0.0.1:1234",
-		Dests:         sets.NewString("128.0.0.1:1234"),
+		Dests:         sets.New("128.0.0.1:1234"),
 	})
 
 	// Send 2 requests, one should time out.
@@ -402,88 +403,88 @@ func TestThrottlerSuccesses(t *testing.T) {
 		revision    *v1.Revision
 		initUpdates []revisionDestsUpdate
 		requests    int
-		wantDests   sets.String
+		wantDests   sets.Set[string]
 	}{{
 		name:     "single healthy podIP",
 		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, pkgnet.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.1:1234"),
+			Dests: sets.New("128.0.0.1:1234"),
 		}, {
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.1:1234"),
+			Dests: sets.New("128.0.0.1:1234"),
 		}},
 		requests:  1,
-		wantDests: sets.NewString("128.0.0.1:1234"),
+		wantDests: sets.New("128.0.0.1:1234"),
 	}, {
 		name:     "single healthy podIP, infinite cc",
 		revision: revision(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, pkgnet.ProtocolHTTP1, 0),
 		// Double updates exercise additional paths.
 		initUpdates: []revisionDestsUpdate{{
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.2:1234", "128.0.0.32:1212"),
+			Dests: sets.New("128.0.0.2:1234", "128.0.0.32:1212"),
 		}, {
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.1:1234"),
+			Dests: sets.New("128.0.0.1:1234"),
 		}},
 		requests:  1,
-		wantDests: sets.NewString("128.0.0.1:1234"),
+		wantDests: sets.New("128.0.0.1:1234"),
 	}, {
 		name:     "single healthy clusterIP",
 		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, pkgnet.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"),
+			Dests: sets.New("128.0.0.1:1234", "128.0.0.2:1234"),
 		}, {
 			Rev:           types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			ClusterIPDest: "129.0.0.1:1234",
-			Dests:         sets.NewString("128.0.0.1:1234"),
+			Dests:         sets.New("128.0.0.1:1234"),
 		}},
 		requests:  1,
-		wantDests: sets.NewString("129.0.0.1:1234"),
+		wantDests: sets.New("129.0.0.1:1234"),
 	}, {
 		name:     "spread podIP load",
 		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, pkgnet.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
 			// Double update here exercises some additional paths.
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.3:1234"),
+			Dests: sets.New("128.0.0.3:1234"),
 		}, {
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"),
+			Dests: sets.New("128.0.0.1:1234", "128.0.0.2:1234"),
 		}},
 		requests:  2,
-		wantDests: sets.NewString("128.0.0.2:1234", "128.0.0.1:1234"),
+		wantDests: sets.New("128.0.0.2:1234", "128.0.0.1:1234"),
 	}, {
 		name:     "clumping test",
 		revision: revision(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, pkgnet.ProtocolHTTP1, 3),
 		initUpdates: []revisionDestsUpdate{{
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.2:4236", "128.0.0.2:1233", "128.0.0.2:1230"),
+			Dests: sets.New("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.2:4236", "128.0.0.2:1233", "128.0.0.2:1230"),
 		}},
 		requests:  3,
-		wantDests: sets.NewString("128.0.0.1:1234"),
+		wantDests: sets.New("128.0.0.1:1234"),
 	}, {
 		name: "roundrobin test",
 		revision: revision(types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			pkgnet.ProtocolHTTP1, 5 /*cc >3*/),
 		initUpdates: []revisionDestsUpdate{{
 			Rev:   types.NamespacedName{Namespace: testNamespace, Name: testRevision},
-			Dests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234", "211.212.213.214"),
+			Dests: sets.New("128.0.0.1:1234", "128.0.0.2:1234", "211.212.213.214"),
 		}},
 		requests: 3,
 		// All three IP addresses should be used if cc>3.
-		wantDests: sets.NewString("128.0.0.1:1234", "128.0.0.2:1234", "211.212.213.214"),
+		wantDests: sets.New("128.0.0.1:1234", "128.0.0.2:1234", "211.212.213.214"),
 	}, {
 		name:     "multiple ClusterIP requests",
 		revision: revisionCC1(types.NamespacedName{Namespace: testNamespace, Name: testRevision}, pkgnet.ProtocolHTTP1),
 		initUpdates: []revisionDestsUpdate{{
 			Rev:           types.NamespacedName{Namespace: testNamespace, Name: testRevision},
 			ClusterIPDest: "129.0.0.1:1234",
-			Dests:         sets.NewString("128.0.0.1:1234", "128.0.0.2:1234"),
+			Dests:         sets.New("128.0.0.1:1234", "128.0.0.2:1234"),
 		}},
 		requests:  2,
-		wantDests: sets.NewString("129.0.0.1:1234"),
+		wantDests: sets.New("129.0.0.1:1234"),
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel, _ := rtesting.SetupFakeContextWithCancel(t)
@@ -555,7 +556,7 @@ func TestThrottlerSuccesses(t *testing.T) {
 			if *cc != 0 {
 				wantCapacity = dests * int(*cc)
 			}
-			if err := wait.PollImmediate(10*time.Millisecond, 3*time.Second, func() (bool, error) {
+			if err := wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, 3*time.Second, true, func(context.Context) (bool, error) {
 				rt.mux.RLock()
 				defer rt.mux.RUnlock()
 				if *cc != 0 {
@@ -568,7 +569,7 @@ func TestThrottlerSuccesses(t *testing.T) {
 			}); err != nil {
 				t.Fatal("Timed out waiting for the capacity to be updated")
 			}
-			t.Log("This activator idx =", rt.activatorIndex)
+			t.Log("This activator idx =", rt.activatorIndex.Load())
 
 			tryContext, cancel2 := context.WithTimeout(context.Background(), 1*time.Second)
 			defer cancel2()
@@ -582,13 +583,13 @@ func TestThrottlerSuccesses(t *testing.T) {
 				return nil
 			})
 
-			gotDests := sets.NewString()
-			for i := 0; i < tc.requests; i++ {
+			gotDests := sets.New[string]()
+			for range tc.requests {
 				result := <-resultChan
 				gotDests.Insert(result.dest)
 			}
 
-			if got, want := gotDests.List(), tc.wantDests.List(); !cmp.Equal(want, got) {
+			if got, want := sets.List(gotDests), sets.List(tc.wantDests); !cmp.Equal(want, got) {
 				t.Errorf("Dests = %v, want: %v, diff: %s", got, want, cmp.Diff(want, got))
 				rt.mux.RLock()
 				defer rt.mux.RUnlock()
@@ -599,8 +600,8 @@ func TestThrottlerSuccesses(t *testing.T) {
 	}
 }
 
-func trackerDestSet(ts []*podTracker) sets.String {
-	ret := sets.NewString()
+func trackerDestSet(ts []*podTracker) sets.Set[string] {
+	ret := sets.New[string]()
 	for _, t := range ts {
 		ret.Insert(t.dest)
 	}
@@ -625,7 +626,7 @@ func TestPodAssignmentFinite(t *testing.T) {
 	update := revisionDestsUpdate{
 		Rev:           revName,
 		ClusterIPDest: "",
-		Dests:         sets.NewString("ip4", "ip3", "ip5", "ip2", "ip1", "ip0"),
+		Dests:         sets.New("ip4", "ip3", "ip5", "ip2", "ip1", "ip0"),
 	}
 	// This should synchronously update throughout the system.
 	// And now we can inspect `rt`.
@@ -634,7 +635,7 @@ func TestPodAssignmentFinite(t *testing.T) {
 		t.Errorf("NumTrackers = %d, want: %d", got, want)
 	}
 	// 6 = 4 * 1 + 2; index 0 and index 1 have 2 pods and others have 1 pod.
-	if got, want := trackerDestSet(rt.assignedTrackers), sets.NewString("ip0", "ip4"); !got.Equal(want) {
+	if got, want := trackerDestSet(rt.assignedTrackers), sets.New("ip0", "ip4"); !got.Equal(want) {
 		t.Errorf("Assigned trackers = %v, want: %v, diff: %s", got, want, cmp.Diff(want, got))
 	}
 	if got, want := rt.breaker.Capacity(), 2*42; got != want {
@@ -675,7 +676,7 @@ func TestPodAssignmentInfinite(t *testing.T) {
 	update := revisionDestsUpdate{
 		Rev:           revName,
 		ClusterIPDest: "",
-		Dests:         sets.NewString("ip3", "ip2", "ip1"),
+		Dests:         sets.New("ip3", "ip2", "ip1"),
 	}
 	// This should synchronously update throughout the system.
 	// And now we can inspect `rt`.
@@ -740,11 +741,11 @@ func TestActivatorsIndexUpdate(t *testing.T) {
 		waitInformers()
 	}()
 
-	possibleDests := sets.NewString("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.23:1234")
-	updateCh <- (revisionDestsUpdate{
+	possibleDests := sets.New("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.23:1234")
+	updateCh <- revisionDestsUpdate{
 		Rev:   revID,
 		Dests: possibleDests,
-	})
+	}
 
 	// Add activator endpoint with 2 activators.
 	publicEp := &corev1.Endpoints{
@@ -770,7 +771,7 @@ func TestActivatorsIndexUpdate(t *testing.T) {
 
 	// Verify capacity gets updated. This is the very last thing we update
 	// so we now know that the rest is set statically.
-	if err := wait.PollImmediate(10*time.Millisecond, time.Second, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, time.Second, true, func(context.Context) (bool, error) {
 		// Capacity doesn't exceed 1 in this test.
 		return rt.breaker.Capacity() == 1, nil
 	}); err != nil {
@@ -795,7 +796,7 @@ func TestActivatorsIndexUpdate(t *testing.T) {
 	endpoints.Informer().GetIndexer().Update(publicEp)
 
 	// Verify the index was computed.
-	if err := wait.PollImmediate(10*time.Millisecond, time.Second, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, time.Second, true, func(context.Context) (bool, error) {
 		return rt.numActivators.Load() == 1 &&
 			rt.activatorIndex.Load() == 0, nil
 	}); err != nil {
@@ -836,11 +837,11 @@ func TestMultipleActivators(t *testing.T) {
 	}()
 
 	revID := types.NamespacedName{Namespace: testNamespace, Name: testRevision}
-	possibleDests := sets.NewString("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.23:1234")
-	updateCh <- (revisionDestsUpdate{
+	possibleDests := sets.New("128.0.0.1:1234", "128.0.0.2:1234", "128.0.0.23:1234")
+	updateCh <- revisionDestsUpdate{
 		Rev:   revID,
 		Dests: possibleDests,
-	})
+	}
 
 	// Add activator endpoint with 2 activators.
 	publicEp := &corev1.Endpoints{
@@ -854,7 +855,8 @@ func TestMultipleActivators(t *testing.T) {
 		},
 		Subsets: []corev1.EndpointSubset{
 			*epSubset(8012, "http", []string{"130.0.0.1", "130.0.0.2"},
-				nil)},
+				nil),
+		},
 	}
 	fake.CoreV1().Endpoints(testNamespace).Create(ctx, publicEp, metav1.CreateOptions{})
 	endpoints.Informer().GetIndexer().Add(publicEp)
@@ -867,7 +869,7 @@ func TestMultipleActivators(t *testing.T) {
 	// Verify capacity gets updated. This is the very last thing we update
 	// so we now know that we got and processed both the activator endpoints
 	// and the application endpoints.
-	if err := wait.PollImmediate(10*time.Millisecond, time.Second, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(ctx, 10*time.Millisecond, time.Second, true, func(context.Context) (bool, error) {
 		return rt.breaker.Capacity() == 1, nil
 	}); err != nil {
 		t.Fatal("Timed out waiting for the capacity to be updated")
@@ -910,10 +912,10 @@ func (t *Throttler) try(ctx context.Context, requests int, try func(string) erro
 	resultChan := make(chan tryResult)
 
 	revID := types.NamespacedName{Namespace: testNamespace, Name: testRevision}
-	for i := 0; i < requests; i++ {
+	for range requests {
 		go func() {
 			var result tryResult
-			if err := t.Try(ctx, revID, func(dest string) error {
+			if err := t.Try(ctx, revID, func(dest string, _ bool) error {
 				result = tryResult{dest: dest}
 				return try(dest)
 			}); err != nil {
@@ -953,8 +955,8 @@ func TestInfiniteBreaker(t *testing.T) {
 
 	// Verify we call the thunk when we have achieved capacity.
 	// Twice.
-	for i := 0; i < 2; i++ {
-		ctx, cancel = context.WithCancel(context.Background())
+	for range 2 {
+		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		res := false
 		if err := b.Maybe(ctx, func() { res = true }); err != nil {
@@ -1156,43 +1158,43 @@ func TestAssignSlice(t *testing.T) {
 		dest: "3",
 	}}
 	t.Run("notrackers", func(t *testing.T) {
-		got := assignSlice([]*podTracker{}, 0 /*selfIdx*/, 1 /*numAct*/, 42 /*cc*/)
+		got := assignSlice([]*podTracker{}, 0 /*selfIdx*/, 1 /*numAct*/)
 		if !cmp.Equal(got, []*podTracker{}, opt) {
 			t.Errorf("Got=%v, want: %v, diff: %s", got, trackers,
 				cmp.Diff([]*podTracker{}, got, opt))
 		}
 	})
 	t.Run("idx=1, na=1", func(t *testing.T) {
-		got := assignSlice(trackers, 1, 1, 1982)
+		got := assignSlice(trackers, 1, 1)
 		if !cmp.Equal(got, trackers, opt) {
 			t.Errorf("Got=%v, want: %v, diff: %s", got, trackers,
 				cmp.Diff(trackers, got, opt))
 		}
 	})
 	t.Run("idx=-1", func(t *testing.T) {
-		got := assignSlice(trackers, -1, 1, 1982)
+		got := assignSlice(trackers, -1, 1)
 		if !cmp.Equal(got, trackers, opt) {
 			t.Errorf("Got=%v, want: %v, diff: %s", got, trackers,
 				cmp.Diff(trackers, got, opt))
 		}
 	})
-	t.Run("idx=1", func(t *testing.T) {
-		cp := append(trackers[:0:0], trackers...)
-		got := assignSlice(cp, 1, 3, 1984)
+	t.Run("idx=1 na=3", func(t *testing.T) {
+		cp := slices.Clone(trackers)
+		got := assignSlice(cp, 1, 3)
 		if !cmp.Equal(got, trackers[1:2], opt) {
 			t.Errorf("Got=%v, want: %v; diff: %s", got, trackers[0:1],
 				cmp.Diff(trackers[1:2], got, opt))
 		}
 	})
 	t.Run("len=1", func(t *testing.T) {
-		got := assignSlice(trackers[0:1], 1, 3, 1988)
+		got := assignSlice(trackers[0:1], 1, 3)
 		if !cmp.Equal(got, trackers[0:1], opt) {
 			t.Errorf("Got=%v, want: %v; diff: %s", got, trackers[0:1],
 				cmp.Diff(trackers[0:1], got, opt))
 		}
 	})
 
-	t.Run("idx=1, cc=5", func(t *testing.T) {
+	t.Run("idx=1, breaker", func(t *testing.T) {
 		trackers := []*podTracker{{
 			dest: "1",
 			b:    queue.NewBreaker(testBreakerParams),
@@ -1203,30 +1205,8 @@ func TestAssignSlice(t *testing.T) {
 			dest: "3",
 			b:    queue.NewBreaker(testBreakerParams),
 		}}
-		cp := append(trackers[:0:0], trackers...)
-		got := assignSlice(cp, 1, 2, 5)
-		want := trackers[1:2]
-		if !cmp.Equal(got, want, opt) {
-			t.Errorf("Got=%v, want: %v; diff: %s", got, want,
-				cmp.Diff(want, got, opt))
-		}
-		if got, want := got[0].b.Capacity(), 0; got != want {
-			t.Errorf("Capacity for the tail pod = %d, want: %d", got, want)
-		}
-	})
-	t.Run("idx=1, cc=6", func(t *testing.T) {
-		trackers := []*podTracker{{
-			dest: "1",
-			b:    queue.NewBreaker(testBreakerParams),
-		}, {
-			dest: "2",
-			b:    queue.NewBreaker(testBreakerParams),
-		}, {
-			dest: "3",
-			b:    queue.NewBreaker(testBreakerParams),
-		}}
-		cp := append(trackers[:0:0], trackers...)
-		got := assignSlice(cp, 1, 2, 6)
+		cp := slices.Clone(trackers)
+		got := assignSlice(cp, 1, 2)
 		want := trackers[1:2]
 		if !cmp.Equal(got, want, opt) {
 			t.Errorf("Got=%v, want: %v; diff: %s", got, want,

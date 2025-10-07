@@ -19,14 +19,13 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
-	"time"
+	context "context"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
-	rest "k8s.io/client-go/rest"
-	v1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
+	gentype "k8s.io/client-go/gentype"
+	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	scheme "knative.dev/serving/pkg/client/clientset/versioned/scheme"
 )
 
@@ -38,158 +37,34 @@ type PodAutoscalersGetter interface {
 
 // PodAutoscalerInterface has methods to work with PodAutoscaler resources.
 type PodAutoscalerInterface interface {
-	Create(ctx context.Context, podAutoscaler *v1alpha1.PodAutoscaler, opts v1.CreateOptions) (*v1alpha1.PodAutoscaler, error)
-	Update(ctx context.Context, podAutoscaler *v1alpha1.PodAutoscaler, opts v1.UpdateOptions) (*v1alpha1.PodAutoscaler, error)
-	UpdateStatus(ctx context.Context, podAutoscaler *v1alpha1.PodAutoscaler, opts v1.UpdateOptions) (*v1alpha1.PodAutoscaler, error)
+	Create(ctx context.Context, podAutoscaler *autoscalingv1alpha1.PodAutoscaler, opts v1.CreateOptions) (*autoscalingv1alpha1.PodAutoscaler, error)
+	Update(ctx context.Context, podAutoscaler *autoscalingv1alpha1.PodAutoscaler, opts v1.UpdateOptions) (*autoscalingv1alpha1.PodAutoscaler, error)
+	// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
+	UpdateStatus(ctx context.Context, podAutoscaler *autoscalingv1alpha1.PodAutoscaler, opts v1.UpdateOptions) (*autoscalingv1alpha1.PodAutoscaler, error)
 	Delete(ctx context.Context, name string, opts v1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error
-	Get(ctx context.Context, name string, opts v1.GetOptions) (*v1alpha1.PodAutoscaler, error)
-	List(ctx context.Context, opts v1.ListOptions) (*v1alpha1.PodAutoscalerList, error)
+	Get(ctx context.Context, name string, opts v1.GetOptions) (*autoscalingv1alpha1.PodAutoscaler, error)
+	List(ctx context.Context, opts v1.ListOptions) (*autoscalingv1alpha1.PodAutoscalerList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
-	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.PodAutoscaler, err error)
+	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *autoscalingv1alpha1.PodAutoscaler, err error)
 	PodAutoscalerExpansion
 }
 
 // podAutoscalers implements PodAutoscalerInterface
 type podAutoscalers struct {
-	client rest.Interface
-	ns     string
+	*gentype.ClientWithList[*autoscalingv1alpha1.PodAutoscaler, *autoscalingv1alpha1.PodAutoscalerList]
 }
 
 // newPodAutoscalers returns a PodAutoscalers
 func newPodAutoscalers(c *AutoscalingV1alpha1Client, namespace string) *podAutoscalers {
 	return &podAutoscalers{
-		client: c.RESTClient(),
-		ns:     namespace,
+		gentype.NewClientWithList[*autoscalingv1alpha1.PodAutoscaler, *autoscalingv1alpha1.PodAutoscalerList](
+			"podautoscalers",
+			c.RESTClient(),
+			scheme.ParameterCodec,
+			namespace,
+			func() *autoscalingv1alpha1.PodAutoscaler { return &autoscalingv1alpha1.PodAutoscaler{} },
+			func() *autoscalingv1alpha1.PodAutoscalerList { return &autoscalingv1alpha1.PodAutoscalerList{} },
+		),
 	}
-}
-
-// Get takes name of the podAutoscaler, and returns the corresponding podAutoscaler object, and an error if there is any.
-func (c *podAutoscalers) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.PodAutoscaler, err error) {
-	result = &v1alpha1.PodAutoscaler{}
-	err = c.client.Get().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		Name(name).
-		VersionedParams(&options, scheme.ParameterCodec).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// List takes label and field selectors, and returns the list of PodAutoscalers that match those selectors.
-func (c *podAutoscalers) List(ctx context.Context, opts v1.ListOptions) (result *v1alpha1.PodAutoscalerList, err error) {
-	var timeout time.Duration
-	if opts.TimeoutSeconds != nil {
-		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
-	}
-	result = &v1alpha1.PodAutoscalerList{}
-	err = c.client.Get().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Timeout(timeout).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// Watch returns a watch.Interface that watches the requested podAutoscalers.
-func (c *podAutoscalers) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
-	var timeout time.Duration
-	if opts.TimeoutSeconds != nil {
-		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
-	}
-	opts.Watch = true
-	return c.client.Get().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Timeout(timeout).
-		Watch(ctx)
-}
-
-// Create takes the representation of a podAutoscaler and creates it.  Returns the server's representation of the podAutoscaler, and an error, if there is any.
-func (c *podAutoscalers) Create(ctx context.Context, podAutoscaler *v1alpha1.PodAutoscaler, opts v1.CreateOptions) (result *v1alpha1.PodAutoscaler, err error) {
-	result = &v1alpha1.PodAutoscaler{}
-	err = c.client.Post().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(podAutoscaler).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// Update takes the representation of a podAutoscaler and updates it. Returns the server's representation of the podAutoscaler, and an error, if there is any.
-func (c *podAutoscalers) Update(ctx context.Context, podAutoscaler *v1alpha1.PodAutoscaler, opts v1.UpdateOptions) (result *v1alpha1.PodAutoscaler, err error) {
-	result = &v1alpha1.PodAutoscaler{}
-	err = c.client.Put().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		Name(podAutoscaler.Name).
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(podAutoscaler).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// UpdateStatus was generated because the type contains a Status member.
-// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
-func (c *podAutoscalers) UpdateStatus(ctx context.Context, podAutoscaler *v1alpha1.PodAutoscaler, opts v1.UpdateOptions) (result *v1alpha1.PodAutoscaler, err error) {
-	result = &v1alpha1.PodAutoscaler{}
-	err = c.client.Put().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		Name(podAutoscaler.Name).
-		SubResource("status").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(podAutoscaler).
-		Do(ctx).
-		Into(result)
-	return
-}
-
-// Delete takes name of the podAutoscaler and deletes it. Returns an error if one occurs.
-func (c *podAutoscalers) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
-	return c.client.Delete().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		Name(name).
-		Body(&opts).
-		Do(ctx).
-		Error()
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *podAutoscalers) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
-	var timeout time.Duration
-	if listOpts.TimeoutSeconds != nil {
-		timeout = time.Duration(*listOpts.TimeoutSeconds) * time.Second
-	}
-	return c.client.Delete().
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		VersionedParams(&listOpts, scheme.ParameterCodec).
-		Timeout(timeout).
-		Body(&opts).
-		Do(ctx).
-		Error()
-}
-
-// Patch applies the patch and returns the patched podAutoscaler.
-func (c *podAutoscalers) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.PodAutoscaler, err error) {
-	result = &v1alpha1.PodAutoscaler{}
-	err = c.client.Patch(pt).
-		Namespace(c.ns).
-		Resource("podautoscalers").
-		Name(name).
-		SubResource(subresources...).
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Body(data).
-		Do(ctx).
-		Into(result)
-	return
 }

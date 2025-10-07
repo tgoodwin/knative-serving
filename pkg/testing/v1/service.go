@@ -145,10 +145,19 @@ func WithServiceAnnotation(k, v string) ServiceOption {
 	}
 }
 
-// WithServiceAnnotationRemoved adds the given annotation to the service.
+// WithServiceAnnotationRemoved removes the given annotation from the service.
 func WithServiceAnnotationRemoved(k string) ServiceOption {
 	return func(svc *v1.Service) {
 		svc.Annotations = kmeta.FilterMap(svc.Annotations, func(s string) bool {
+			return k == s
+		})
+	}
+}
+
+// WithServiceLabelRemoved removes the given label from the service.
+func WithServiceLabelRemoved(k string) ServiceOption {
+	return func(svc *v1.Service) {
+		svc.Labels = kmeta.FilterMap(svc.Labels, func(s string) bool {
 			return k == s
 		})
 	}
@@ -429,6 +438,22 @@ func WithReadinessProbe(p *corev1.Probe) ServiceOption {
 	}
 }
 
+// WithLivenessProbe sets the provided probe to be the liveness
+// probe on the service.
+func WithLivenessProbe(p *corev1.Probe) ServiceOption {
+	return func(s *v1.Service) {
+		s.Spec.Template.Spec.Containers[0].LivenessProbe = p
+	}
+}
+
+// WithStartupProbe sets the provided probe to be the startup
+// probe on the service.
+func WithStartupProbe(p *corev1.Probe) ServiceOption {
+	return func(s *v1.Service) {
+		s.Spec.Template.Spec.Containers[0].StartupProbe = p
+	}
+}
+
 // MarkConfigurationNotReconciled calls the function of the same name on the Service's status.
 func MarkConfigurationNotReconciled(service *v1.Service) {
 	service.Status.MarkConfigurationNotReconciled()
@@ -486,21 +511,19 @@ func WithFailedConfig(name, reason, message string) ServiceOption {
 	}
 }
 
-var (
-	// configSpec is the spec used for the different styles of Service rollout.
-	configSpec = v1.ConfigurationSpec{
-		Template: v1.RevisionTemplateSpec{
-			Spec: v1.RevisionSpec{
-				TimeoutSeconds: ptr.Int64(60),
-				PodSpec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Image: "busybox",
-					}},
-				},
+// configSpec is the spec used for the different styles of Service rollout.
+var configSpec = v1.ConfigurationSpec{
+	Template: v1.RevisionTemplateSpec{
+		Spec: v1.RevisionSpec{
+			TimeoutSeconds: ptr.Int64(60),
+			PodSpec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Image: "busybox",
+				}},
 			},
 		},
-	}
-)
+	},
+}
 
 // WithInitContainer adds init container to a service.
 func WithInitContainer(p corev1.Container) ServiceOption {
