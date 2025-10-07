@@ -3,19 +3,22 @@ package kamera
 import (
 	"context"
 	"fmt"
-	"time"
 
 	// Standard Kubernetes types
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
-	test "k8s.io/client-go/testing"
+	testing "k8s.io/client-go/testing"
 	filteredinformerfactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
 	"knative.dev/pkg/injection"
 	"knative.dev/pkg/reconciler"
 	reconcilertesting "knative.dev/pkg/reconciler/testing"
 
+	"github.com/tgoodwin/kamera/pkg/event"
+	"github.com/tgoodwin/kamera/pkg/replay"
+	"github.com/tgoodwin/kamera/pkg/tracecheck"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -24,16 +27,12 @@ import (
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	autoscalercfg "knative.dev/serving/pkg/autoscaler/config"
 	fakeservingclient "knative.dev/serving/pkg/client/injection/client/fake"
-	metricinformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/metric"
-	painformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/podautoscaler"
-	configinformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/configuration"
-	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision"
-	routeinformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/route"
-	serviceinformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/service"
 	"knative.dev/serving/pkg/gc"
 	"knative.dev/serving/pkg/reconciler/route/config"
 
 	netcfg "knative.dev/networking/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	// Knative pkg imports
 	// Knative controller plumbing
@@ -46,16 +45,8 @@ import (
 	cfgmap "knative.dev/serving/pkg/apis/config"
 )
 
-type Result struct {
-	Requeue      bool
-	RequeueAfter time.Duration // in seconds
-}
-
-type Strategy interface {
-	PrepareState(ctx context.Context, state []runtime.Object) (context.Context, error)
-	ReconcileAtState(ctx context.Context, nsName types.NamespacedName) (Result, error)
-	RetrieveEffects(ctx context.Context) ([]test.Action, error)
-}
+// Ensure KnativeStrategy implements the Strategy interface
+var _ tracecheck.Strategy = (*KnativeStrategy)(nil)
 
 // ControllerFactory is a function that creates a new controller.
 type ControllerFactory func(ctx context.Context, cmw configmap.Watcher) *controller.Impl
@@ -63,11 +54,12 @@ type ControllerFactory func(ctx context.Context, cmw configmap.Watcher) *control
 // KnativeStrategy implements the Strategy interface for Knative controllers.
 type KnativeStrategy struct {
 	factory   ControllerFactory
+	recorder  replay.EffectRecorder
 	selectors []string
 }
 
 // NewKnativeStrategy creates a new KnativeStrategy for a given controller factory.
-func NewKnativeStrategy(factory ControllerFactory, selectors ...string) (*KnativeStrategy, error) {
+func NewKnativeStrategy(factory ControllerFactory, recorder replay.EffectRecorder, selectors ...string) (*KnativeStrategy, error) {
 	if factory == nil {
 		return nil, fmt.Errorf("controller factory cannot be nil")
 	}
@@ -164,23 +156,78 @@ func NewKnativeStrategy(factory ControllerFactory, selectors ...string) (*Knativ
 	return &KnativeStrategy{
 		factory:   partial,
 		selectors: selectors,
+		recorder:  recorder,
 	}, nil
 }
 
 // PrepareState sets up the fake clients and informers for the reconciler under test.
-func (ks *KnativeStrategy) PrepareState(ctx context.Context, state []runtime.Object) (context.Context, error) {
-	ctx, _, err := SetupClientState(ctx, state, ks.selectors...)
-	return ctx, err
+func (ks *KnativeStrategy) PrepareState(ctx context.Context, state []runtime.Object) (context.Context, func(), error) {
+	return SetupClientState(ctx, state, ks.selectors...)
 }
 
 // ReconcileAtState invokes the reconciler for a given state.
-func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.NamespacedName) (Result, error) {
+func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.NamespacedName) (reconcile.Result, error) {
+	c := fakeservingclient.Get(ctx)
+	tracker := c.Tracker()
+
+	// Add a reactor to intercept and record actions.
+	// This reactor is scoped to this ReconcileAtState call.
+	c.PrependReactor("*", "*", func(action testing.Action) (handled bool, ret runtime.Object, err error) {
+		var obj runtime.Object
+		var op event.OperationType
+
+		switch action.GetVerb() {
+		case "get":
+			a := action.(testing.GetAction)
+			obj, err = tracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			op = event.GET
+		case "create":
+			a := action.(testing.CreateAction)
+			obj = a.GetObject()
+			op = event.CREATE
+		case "update":
+			a := action.(testing.UpdateAction)
+			obj = a.GetObject()
+			op = event.UPDATE
+		case "delete":
+			a := action.(testing.DeleteAction)
+			obj, err = tracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			op = event.MARK_FOR_DELETION
+		case "patch":
+			a := action.(testing.PatchAction)
+			obj, err = tracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			op = event.PATCH
+		default:
+			fmt.Println("WARNING Unhandled action type:", action.GetVerb(), action.GetResource().Resource)
+			return false, nil, nil
+		}
+
+		if err != nil {
+			// If the tracker returned an error (e.g., NotFound), we still want the
+			// reconciler to see that error, so we don't handle the action.
+			return false, nil, err
+		}
+
+		if obj != nil {
+			clientObj, ok := obj.(client.Object)
+			if !ok {
+				// This should not happen with standard Kubernetes objects, but it's good practice to handle it.
+				return false, nil, fmt.Errorf("object of type %T does not implement client.Object", obj)
+			}
+			// Record the effect with the full object.
+			ks.recorder.RecordEffect(ctx, clientObj, op, nil)
+		}
+
+		// Return false to ensure the default reactors run and the action is recorded.
+		return false, nil, nil
+	})
+
 	// must re-initialize the controller each time to reset its informer state
 	ctrl := ks.factory(ctx, nil)
 	if la, ok := ctrl.Reconciler.(reconciler.LeaderAware); ok {
 		la.Promote(reconciler.UniversalBucket(), func(reconciler.Bucket, types.NamespacedName) {})
 	} else {
-		return Result{}, fmt.Errorf("Reconciler is not leader-aware")
+		return reconcile.Result{}, fmt.Errorf("Reconciler is not leader-aware")
 	}
 
 	key := nsName.String()
@@ -188,49 +235,23 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 
 	requeue, requeueAfter := controller.IsRequeueKey(err)
 	if err != nil && !requeue {
-		return Result{}, err // Return actual error if it's not a requeue request
+		return reconcile.Result{}, err // Return actual error if it's not a requeue request
 	}
 
-	return Result{
+	return reconcile.Result{
 		Requeue:      requeue,
 		RequeueAfter: requeueAfter,
 	}, nil
 }
 
 // RetrieveEffects extracts the results of a reconciliation.
-func (ks *KnativeStrategy) RetrieveEffects(ctx context.Context) ([]test.Action, error) {
-	client := fakeservingclient.Get(ctx)
-	if client == nil {
-		return nil, fmt.Errorf("fake serving client not found in context")
-	}
-	return client.Actions(), nil
-}
-
-// loadObjectsFromTrace is a stub function.
-func loadObjectsFromTrace(tracePath string) ([]runtime.Object, error) {
-	fmt.Printf("Stub: Loading objects from trace file at %s\n", tracePath)
-	return []runtime.Object{
-		&v1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "hello-world",
-				Namespace: "default",
-			},
-			Spec: v1.ServiceSpec{
-				ConfigurationSpec: v1.ConfigurationSpec{
-					Template: v1.RevisionTemplateSpec{
-						Spec: v1.RevisionSpec{
-							PodSpec: corev1.PodSpec{
-								Containers: []corev1.Container{{
-									Image: "gcr.io/knative-samples/helloworld-go",
-								}},
-							},
-						},
-					},
-				},
-			},
-		},
-	}, nil
-}
+// func (ks *KnativeStrategy) RetrieveEffects(ctx context.Context) (tracecheck.Changes, error) {
+// 	client := fakeservingclient.Get(ctx)
+// 	if client == nil {
+// 		return tracecheck.Changes{}, fmt.Errorf("fake serving client not found in context")
+// 	}
+// 	return client.Actions(), nil
+// }
 
 func SetupClientState(ctx context.Context, state []runtime.Object, selectors ...string) (context.Context, func(), error) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -309,80 +330,14 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 			if _, err := kubeclient.CoreV1().Services(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
 				return fmt.Errorf("failed to create service: %w", err)
 			}
+		case *appsv1.Deployment:
+			if _, err := kubeclient.AppsV1().Deployments(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("failed to create deployment: %w", err)
+			}
 		default:
-			panic("unsupported type -- need to add a case for it")
+			panic(fmt.Sprintf("unsupported type %T -- need to add a case for it", o))
 		}
 	}
 	return nil
 
-}
-
-// setupControllerState initializes the context with fake clients and populates their informer caches.
-func setupControllerState(ctx context.Context, initialWorldState []runtime.Object) (context.Context, error) {
-	ctx, _ = fakeservingclient.With(ctx, initialWorldState...)
-
-	serviceInformer := serviceinformer.Get(ctx)
-	routeInformer := routeinformer.Get(ctx)
-	configInformer := configinformer.Get(ctx)
-	revisionInformer := revisioninformer.Get(ctx)
-	paInformer := painformer.Get(ctx)
-	metricInformer := metricinformer.Get(ctx)
-
-	for _, obj := range initialWorldState {
-		switch o := obj.(type) {
-		case *v1.Service:
-			if err := serviceInformer.Informer().GetIndexer().Add(o); err != nil {
-				return nil, fmt.Errorf("failed to add service to informer: %w", err)
-			}
-		case *v1.Route:
-			if err := routeInformer.Informer().GetIndexer().Add(o); err != nil {
-				return nil, fmt.Errorf("failed to add route to informer: %w", err)
-			}
-		case *v1.Configuration:
-			if err := configInformer.Informer().GetIndexer().Add(o); err != nil {
-				return nil, fmt.Errorf("failed to add configuration to informer: %w", err)
-			}
-		case *v1.Revision:
-			if err := revisionInformer.Informer().GetIndexer().Add(o); err != nil {
-				return nil, fmt.Errorf("failed to add revision to informer: %w", err)
-			}
-		case *autoscalingv1alpha1.PodAutoscaler:
-			if err := paInformer.Informer().GetIndexer().Add(o); err != nil {
-				return nil, fmt.Errorf("failed to add podautoscaler to informer: %w", err)
-			}
-		case *autoscalingv1alpha1.Metric:
-			if err := metricInformer.Informer().GetIndexer().Add(o); err != nil {
-				return nil, fmt.Errorf("failed to add metric to informer: %w", err)
-			}
-		default:
-			// Ignore other types for now.
-		}
-	}
-	return ctx, nil
-}
-
-// extractWriteset inspects the fake client's actions and returns the created/updated objects.
-func extractWriteset(ctx context.Context) ([]runtime.Object, error) {
-	client := fakeservingclient.Get(ctx)
-	if client == nil {
-		return nil, fmt.Errorf("fake serving client not found in context")
-	}
-
-	actions := client.Actions()
-	writeset := make([]runtime.Object, 0, len(actions))
-
-	for _, action := range actions {
-		var obj runtime.Object
-		switch act := action.(type) {
-		case test.CreateActionImpl:
-			obj = act.GetObject()
-		case test.UpdateActionImpl:
-			obj = act.GetObject()
-		default:
-			// Skip non-mutating actions like Get, List, Watch
-			continue
-		}
-		writeset = append(writeset, obj)
-	}
-	return writeset, nil
 }

@@ -1,6 +1,9 @@
 package kamera
 
 import (
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -57,6 +60,11 @@ import (
 	"knative.dev/serving/pkg/reconciler/revision/resources"
 	"knative.dev/serving/pkg/reconciler/revision/resources/names"
 
+	client "sigs.k8s.io/controller-runtime/pkg/client"
+
+	event "github.com/tgoodwin/kamera/pkg/event"
+	replay "github.com/tgoodwin/kamera/pkg/replay"
+
 	kpareconciler "knative.dev/serving/pkg/reconciler/autoscaling/kpa"
 	certreconciler "knative.dev/serving/pkg/reconciler/certificate"
 	configurationreconciler "knative.dev/serving/pkg/reconciler/configuration"
@@ -67,6 +75,25 @@ import (
 
 	"context"
 )
+
+type recordedEffect struct {
+	Object client.Object
+	OpType event.OperationType
+}
+
+type FakeRecorder struct {
+	effects []recordedEffect
+}
+
+var _ replay.EffectRecorder = (*FakeRecorder)(nil)
+
+func (r *FakeRecorder) RecordEffect(ctx context.Context, obj client.Object, opType event.OperationType, precondition *replay.PreconditionInfo) error {
+	r.effects = append(r.effects, recordedEffect{
+		Object: obj,
+		OpType: opType,
+	})
+	return nil
+}
 
 func TestNewKnativeStrategy(t *testing.T) {
 	tests := []struct {
@@ -115,7 +142,7 @@ func TestNewKnativeStrategy(t *testing.T) {
 				// callback ensures that we add the required selectors before SetupFakeContext proceeds.
 				return filteredinformerfactory.WithSelectors(ctx, selectors...)
 			})
-			_, err := NewKnativeStrategy(tt.factory)
+			_, err := NewKnativeStrategy(tt.factory, &FakeRecorder{}, selectors...)
 			if err != nil {
 				t.Errorf("NewKnativeStrategy() error = %v", err)
 			}
@@ -152,19 +179,20 @@ func TestKnativeStrategyReconciliation(t *testing.T) {
 		initialState := []runtime.Object{svc}
 		ctx := logtesting.TestContextWithLogger(t)
 
-		strategy, err := NewKnativeStrategy(servicereconciler.NewController)
+		strategy, err := NewKnativeStrategy(servicereconciler.NewController, &FakeRecorder{})
 		if err != nil {
 			t.Fatalf("NewKnativeStrategy() error = %v", err)
 		}
-		ctx, err = strategy.PrepareState(ctx, initialState)
+		ctx, cancel, err := strategy.PrepareState(ctx, initialState)
 		if err != nil {
 			t.Fatalf("SetupClientState() error = %v", err)
 		}
+		t.Cleanup(cancel)
 		if _, err := strategy.ReconcileAtState(ctx, key); err != nil {
 			t.Fatalf("ReconcileAtState() error = %v", err)
 		}
 
-		assertCreates(t, ctx, strategy, "configurations", "routes")
+		assertCreates(t, ctx, strategy, "Configuration", "Route")
 	})
 
 	t.Run("Revision Reconciler", func(t *testing.T) {
@@ -191,20 +219,21 @@ func TestKnativeStrategyReconciliation(t *testing.T) {
 			},
 		}
 
-		strategy, err := NewKnativeStrategy(revisionreconciler.NewController)
+		strategy, err := NewKnativeStrategy(revisionreconciler.NewController, &FakeRecorder{})
 		if err != nil {
 			t.Fatalf("NewKnativeStrategy() error = %v", err)
 		}
-		ctx, err := strategy.PrepareState(logtesting.TestContextWithLogger(t), initialState)
+		ctx, cancel, err := strategy.PrepareState(logtesting.TestContextWithLogger(t), initialState)
 		if err != nil {
 			t.Fatalf("SetupClientState() error = %v", err)
 		}
+		t.Cleanup(cancel)
 		if _, err := strategy.ReconcileAtState(ctx, key); err != nil {
 			t.Fatalf("ReconcileAtState() error = %v", err)
 		}
 
 		// this just updated a revision -- did not create anything new
-		assertCreates(t, ctx, strategy, "podautoscalers")
+		assertCreates(t, ctx, strategy, "PodAutoscaler")
 	})
 
 	t.Run("KPA Reconciler", func(t *testing.T) {
@@ -233,21 +262,22 @@ func TestKnativeStrategyReconciliation(t *testing.T) {
 			multiScaler := scaling.NewMultiScaler(ctx.Done(), nil, logging.FromContext(ctx))
 			return kpareconciler.NewController(ctx, cmw, multiScaler)
 		}
-		strategy, err := NewKnativeStrategy(factory, serving.RevisionUID)
+		strategy, err := NewKnativeStrategy(factory, &FakeRecorder{}, serving.RevisionUID)
 		if err != nil {
 			t.Fatalf("NewKnativeStrategy() error = %v", err)
 		}
 
-		ctx, err := strategy.PrepareState(logtesting.TestContextWithLogger(t), initialState)
+		ctx, cancel, err := strategy.PrepareState(logtesting.TestContextWithLogger(t), initialState)
 		if err != nil {
 			t.Fatalf("SetupClientState() error = %v", err)
 		}
 
+		t.Cleanup(cancel)
 		if _, err := strategy.ReconcileAtState(ctx, types.NamespacedName{Namespace: ns, Name: pa.Name}); err != nil {
 			t.Fatalf("ReconcileAtState() error = %v", err)
 		}
 
-		assertActions(t, ctx, strategy, "update", "podautoscalers")
+		assertActions(t, ctx, strategy, "update", "PodAutoscaler")
 	})
 
 	t.Run("Configuration Reconciler", func(t *testing.T) {
@@ -260,19 +290,20 @@ func TestKnativeStrategyReconciliation(t *testing.T) {
 					}}}},
 			},
 		}
-		strategy, err := NewKnativeStrategy(configurationreconciler.NewController)
+		strategy, err := NewKnativeStrategy(configurationreconciler.NewController, &FakeRecorder{})
 		if err != nil {
 			t.Fatalf("NewKnativeStrategy() error = %v", err)
 		}
-		ctx, err := strategy.PrepareState(logtesting.TestContextWithLogger(t), initialState)
+		ctx, cancel, err := strategy.PrepareState(logtesting.TestContextWithLogger(t), initialState)
 		if err != nil {
 			t.Fatalf("SetupClientState() error = %v", err)
 		}
+		t.Cleanup(cancel)
 		if _, err := strategy.ReconcileAtState(ctx, key); err != nil {
 			t.Fatalf("ReconcileAtState() error = %v", err)
 		}
 
-		assertCreates(t, ctx, strategy, "revisions")
+		assertCreates(t, ctx, strategy, "Revision")
 	})
 }
 
@@ -286,16 +317,24 @@ func assertCreates(t *testing.T, ctx context.Context, strategy *KnativeStrategy,
 func assertActions(t *testing.T, ctx context.Context, strategy *KnativeStrategy, verb string, wantResources ...string) {
 	t.Helper()
 
-	actions, err := strategy.RetrieveEffects(ctx)
-	if err != nil {
-		t.Fatalf("RetrieveEffects() error = %v", err)
+	recorder, ok := strategy.recorder.(*FakeRecorder)
+	if !ok {
+		t.Fatalf("KnativeStrategy.recorder is not of type *FakeRecorder")
 	}
+	actions := recorder.effects
 
 	got := make(map[string]bool)
 	for _, action := range actions {
-		t.Log("Action:", action.GetVerb(), action.GetResource().Resource)
-		if action.GetVerb() == verb {
-			got[action.GetResource().Resource] = true
+		// The verb from the reactor is now an event.OperationType, so we compare it as a string.
+		fmt.Printf("Found %s action on resource %T with actionType %q\n", verb, action.Object, action.OpType)
+		if string(action.OpType) == strings.ToUpper(verb) {
+			// Using reflection is more reliable than GetObjectKind() which may not be populated.
+			// We get the type of the object, which will be a pointer (e.g., *v1.Configuration).
+			// We then get the element type to get the struct name (e.g., v1.Configuration).
+			// Finally, we take the name of that struct (e.g., "Configuration").
+			kind := reflect.TypeOf(action.Object).Elem().Name()
+			fmt.Printf("  -> matches %s action on resource of type %q\n", verb, kind)
+			got[kind] = true
 		}
 	}
 

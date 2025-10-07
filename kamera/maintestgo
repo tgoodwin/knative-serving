@@ -1,9 +1,10 @@
-package main
+/w/ package main
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"testing"
 	"time"
 
 	// Standard Kubernetes types
@@ -29,6 +30,7 @@ import (
 	// Knative controller plumbing
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
+	"knative.dev/pkg/injection/fake"
 	"knative.dev/pkg/logging"
 
 	// The actual reconciler implementations
@@ -69,7 +71,7 @@ func NewKnativeStrategy(factory ControllerFactory) (*KnativeStrategy, error) {
 
 	// This context is temporary, used only for initialization.
 	ctx := logging.WithLogger(context.Background(), logging.FromContext(context.Background()))
-	ctx, _ = fakeservingclient.With(ctx) // Initialize with an empty fake client
+	ctx, _ = fake.SetupFakeContext(ctx)
 
 	cmw := configmap.NewStaticWatcher()
 	ctrl := factory(ctx, cmw)
@@ -206,98 +208,85 @@ func extractWriteset(ctx context.Context) ([]runtime.Object, error) {
 	return writeset, nil
 }
 
-func main() {
+func TestHarness(t *testing.T) {
 	tracePath := "/path/to/tracefile.json"
 	initialObjects, err := loadObjectsFromTrace(tracePath)
 	if err != nil {
-		log.Fatalf("Failed to load objects from trace: %v", err)
+		t.Fatalf("Failed to load objects from trace: %v", err)
 	}
 
 	ctx := logging.WithLogger(context.Background(), logging.FromContext(context.Background()))
+	ctx, _ = fake.SetupFakeContext(ctx)
 
 	// --- Service Controller Reconciliation ---
 	// Create a strategy for the Service reconciler.
 	serviceStrategy, err := NewKnativeStrategy(servicereconciler.NewController)
 	if err != nil {
-		log.Fatalf("Failed to create KnativeStrategy: %v", err)
+		t.Fatalf("Failed to create KnativeStrategy: %v", err)
 	}
 
 	serviceCtx, err := serviceStrategy.PrepareState(ctx, initialObjects)
 	if err != nil {
-		log.Fatalf("Failed to prepare state: %v", err)
+		t.Fatalf("Failed to prepare state: %v", err)
 	}
 
-	fmt.Println("Harness initialized successfully.")
-	fmt.Printf("Service controller is ready: %v\n", serviceStrategy.Controller != nil)
-	fmt.Println("\n--- Invoking Service Reconciler for key: default/hello-world ---")
+	t.Log("Harness initialized successfully.")
+	t.Logf("Service controller is ready: %v", serviceStrategy.Controller != nil)
+	t.Log("\n--- Invoking Service Reconciler for key: default/hello-world ---")
 
 	nsName := types.NamespacedName{Namespace: "default", Name: "hello-world"}
 	if result, err := serviceStrategy.ReconcileAtState(serviceCtx, nsName); err != nil {
-		log.Printf("Reconcile failed: %v", err)
+		t.Logf("Reconcile failed: %v", err)
 	} else {
 		if result.Requeue {
-			fmt.Printf("Reconcile returned a requeue request (this is expected).\n")
+			t.Log("Reconcile returned a requeue request (this is expected).")
 		} else {
-			fmt.Println("Reconcile completed successfully.")
+			t.Log("Reconcile completed successfully.")
 		}
 	}
 
 	// After the reconcile, extract the writeset.
 	writeset, err := extractWriteset(serviceCtx)
 	if err != nil {
-		log.Fatalf("Failed to extract writeset: %v", err)
+		t.Fatalf("Failed to extract writeset: %v", err)
 	}
 
-	fmt.Printf("\n--- Captured Writeset (%d objects) ---\n", len(writeset))
+	t.Logf("\n--- Captured Writeset (%d objects) ---", len(writeset))
 	for i, obj := range writeset {
 		// Use sigs.k8s.io/yaml for pretty printing.
 		bytes, err := yaml.Marshal(obj)
 		if err != nil {
-			log.Printf("Failed to marshal object %d: %v", i, err)
+			t.Logf("Failed to marshal object %d: %v", i, err)
 			continue
 		}
-		fmt.Printf("-- Object %d --\n", i+1)
-		fmt.Println(string(bytes))
+		t.Logf("-- Object %d --\n%s", i+1, string(bytes))
 	}
 
 	// --- PodAutoscaler Controller Reconciliation ---
 	// The KPA reconciler needs a MultiScaler. We can create a fake one.
 	multiScaler := scaling.NewMultiScaler(ctx.Done(), nil, logging.FromContext(ctx))
 
-	// Wrap the KPA controller constructor to match our ControllerFactory signature.
 	kpaControllerFactory := func(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
 		return kpareconciler.NewController(ctx, cmw, multiScaler)
 	}
 
-	// Create a strategy for the PodAutoscaler reconciler.
 	kpaStrategy, err := NewKnativeStrategy(kpaControllerFactory)
 	if err != nil {
-		log.Fatalf("Failed to create KPA KnativeStrategy: %v", err)
+		t.Fatalf("Failed to create KPA KnativeStrategy: %v", err)
 	}
-
-	// The PA is created by the Revision controller, which is not run here.
-	// For this test, we'll add the PA that the Revision controller would have created.
-	// initialObjects = append(initialObjects, resources.MakePA(initialObjects[0].(*v1.Service), nil))
-	// The PA is created by the Revision controller. To test the KPA reconciler
-	// independently, we would need to manually construct a PodAutoscaler object
-	// and add it to initialObjects. For this PoC, we'll focus on controllers
-	// whose inputs are more readily available from the initial Service.
-	// For example:
-	// initialObjects = append(initialObjects, revisionresources.MakePA(revisionObject, nil))
 
 	kpaCtx, err := kpaStrategy.PrepareState(ctx, initialObjects)
 	if err != nil {
-		log.Fatalf("Failed to prepare KPA state: %v", err)
+		t.Fatalf("Failed to prepare KPA state: %v", err)
 	}
 
-	fmt.Printf("\nPodAutoscaler controller is ready: %v\n", kpaStrategy.Controller != nil)
-	fmt.Println("\n--- Invoking PodAutoscaler Reconciler for key: default/hello-world ---")
+	t.Logf("\nPodAutoscaler controller is ready: %v", kpaStrategy.Controller != nil)
+	t.Log("\n--- Invoking PodAutoscaler Reconciler for key: default/hello-world ---")
 
-	// The PA has the same name as the Service in this context.
 	if _, err := kpaStrategy.ReconcileAtState(kpaCtx, nsName); err != nil {
-		log.Printf("KPA Reconcile failed: %v", err)
+		t.Logf("KPA Reconcile failed: %v", err)
 	} else {
-		fmt.Println("KPA Reconcile completed successfully.")
+		t.Log("KPA Reconcile completed successfully.")
 	}
 
 	// --- Revision Controller Reconciliation ---
@@ -307,48 +296,42 @@ func main() {
 	}
 	revisionCtx, err := revisionStrategy.PrepareState(ctx, initialObjects)
 	if err != nil {
-		log.Fatalf("Failed to prepare Revision state: %v", err)
+		t.Fatalf("Failed to prepare Revision state: %v", err)
 	}
-	fmt.Printf("Revision context ready: %v\n", revisionCtx != nil)
-	fmt.Printf("\nRevision controller is ready: %v\n", revisionStrategy.Controller != nil)
-	// Note: The revision controller is typically triggered by changes to a Configuration,
-	// which is created by the Service controller. A full end-to-end flow would
-	// require chaining these reconciliations.
+	t.Logf("Revision context ready: %v", revisionCtx != nil)
+	t.Logf("\nRevision controller is ready: %v", revisionStrategy.Controller != nil)
 
 	// --- ServerlessService (SKS) Controller Reconciliation ---
 	sksStrategy, err := NewKnativeStrategy(sksreconciler.NewController)
 	if err != nil {
-		log.Fatalf("Failed to create SKS KnativeStrategy: %v", err)
+		t.Fatalf("Failed to create SKS KnativeStrategy: %v", err)
 	}
 	sksCtx, err := sksStrategy.PrepareState(ctx, initialObjects)
 	if err != nil {
-		log.Fatalf("Failed to prepare SKS state: %v", err)
+		t.Fatalf("Failed to prepare SKS state: %v", err)
 	}
-	fmt.Printf("SKS context ready: %v\n", sksCtx != nil)
-	fmt.Printf("\nServerlessService controller is ready: %v\n", sksStrategy.Controller != nil)
-	// Note: The SKS controller is triggered by PodAutoscaler changes.
+	t.Logf("SKS context ready: %v", sksCtx != nil)
+	t.Logf("\nServerlessService controller is ready: %v", sksStrategy.Controller != nil)
 
 	// --- Certificate Controller Reconciliation ---
-	// The certificate reconciler constructor has a different signature.
 	certControllerFactory := func(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
 		return certreconciler.NewController(ctx, cmw)
 	}
 	certStrategy, err := NewKnativeStrategy(certControllerFactory)
 	if err != nil {
-		log.Fatalf("Failed to create Certificate KnativeStrategy: %v", err)
+		t.Fatalf("Failed to create Certificate KnativeStrategy: %v", err)
 	}
 	certCtx, err := certStrategy.PrepareState(ctx, initialObjects)
 	if err != nil {
-		log.Fatalf("Failed to prepare Certificate state: %v", err)
+		t.Fatalf("Failed to prepare Certificate state: %v", err)
 	}
-	fmt.Printf("Certificate context ready: %v\n", certCtx != nil)
-	fmt.Printf("\nCertificate controller is ready: %v\n", certStrategy.Controller != nil)
-	// Note: The Certificate controller is triggered by Route changes.
+	t.Logf("Certificate context ready: %v", certCtx != nil)
+	t.Logf("\nCertificate controller is ready: %v", certStrategy.Controller != nil)
 
 	// --- Route Controller Reconciliation ---
 	routeStrategy, err := NewKnativeStrategy(routereconciler.NewController)
 	if err != nil {
-		log.Fatalf("Failed to create Route KnativeStrategy: %v", err)
+		t.Fatalf("Failed to create Route KnativeStrategy: %v", err)
 	}
 	routeCtx, err := routeStrategy.PrepareState(ctx, initialObjects)
 	if err != nil {
@@ -356,7 +339,6 @@ func main() {
 	}
 	fmt.Printf("Route context ready: %v\n", routeCtx != nil)
 	fmt.Printf("\nRoute controller is ready: %v\n", routeStrategy.Controller != nil)
-	// Note: The Route controller is triggered by Service changes.
 
-	fmt.Println("\n--- All controller strategies instantiated ---")
+	t.Log("\n--- All controller strategies instantiated ---")
 }
