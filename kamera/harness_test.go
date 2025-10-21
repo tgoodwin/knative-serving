@@ -232,8 +232,8 @@ func TestKnativeStrategyReconciliation(t *testing.T) {
 			t.Fatalf("ReconcileAtState() error = %v", err)
 		}
 
-		// this just updated a revision -- did not create anything new
-		assertCreates(t, ctx, strategy, "PodAutoscaler")
+		// The revision reconciler creates a PodAutoscaler and a Deployment.
+		assertCreates(t, ctx, strategy, "PodAutoscaler", "Deployment")
 	})
 
 	t.Run("KPA Reconciler", func(t *testing.T) {

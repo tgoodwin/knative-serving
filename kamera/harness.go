@@ -165,21 +165,21 @@ func (ks *KnativeStrategy) PrepareState(ctx context.Context, state []runtime.Obj
 	return SetupClientState(ctx, state, ks.selectors...)
 }
 
-// ReconcileAtState invokes the reconciler for a given state.
-func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.NamespacedName) (reconcile.Result, error) {
-	c := fakeservingclient.Get(ctx)
-	tracker := c.Tracker()
-
-	// Add a reactor to intercept and record actions.
-	// This reactor is scoped to this ReconcileAtState call.
-	c.PrependReactor("*", "*", func(action testing.Action) (handled bool, ret runtime.Object, err error) {
+// newReactor creates a new reactor function that intercepts client actions,
+// records them as effects, and uses the provided trackers to fetch object states.
+func newReactor(ctx context.Context, recorder replay.EffectRecorder, servingTracker, kubeTracker testing.ObjectTracker) testing.ReactionFunc {
+	return func(action testing.Action) (handled bool, ret runtime.Object, err error) {
 		var obj runtime.Object
 		var op event.OperationType
 
 		switch action.GetVerb() {
 		case "get":
 			a := action.(testing.GetAction)
-			obj, err = tracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			// Check both trackers.
+			obj, err = servingTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			if err != nil {
+				obj, err = kubeTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			}
 			op = event.GET
 		case "create":
 			a := action.(testing.CreateAction)
@@ -191,36 +191,46 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 			op = event.UPDATE
 		case "delete":
 			a := action.(testing.DeleteAction)
-			obj, err = tracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			obj, err = servingTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			if err != nil {
+				obj, err = kubeTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			}
 			op = event.MARK_FOR_DELETION
 		case "patch":
 			a := action.(testing.PatchAction)
-			obj, err = tracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			// Check both trackers.
+			obj, err = servingTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			if err != nil {
+				obj, err = kubeTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
+			}
 			op = event.PATCH
 		default:
 			fmt.Println("WARNING Unhandled action type:", action.GetVerb(), action.GetResource().Resource)
 			return false, nil, nil
 		}
 
-		if err != nil {
-			// If the tracker returned an error (e.g., NotFound), we still want the
-			// reconciler to see that error, so we don't handle the action.
-			return false, nil, err
+		if err == nil && obj != nil {
+			recorder.RecordEffect(ctx, obj.(client.Object), op, nil)
 		}
 
-		if obj != nil {
-			clientObj, ok := obj.(client.Object)
-			if !ok {
-				// This should not happen with standard Kubernetes objects, but it's good practice to handle it.
-				return false, nil, fmt.Errorf("object of type %T does not implement client.Object", obj)
-			}
-			// Record the effect with the full object.
-			ks.recorder.RecordEffect(ctx, clientObj, op, nil)
-		}
+		// Return false to let the default reactor handle the action.
+		return false, nil, err
+	}
+}
 
-		// Return false to ensure the default reactors run and the action is recorded.
-		return false, nil, nil
-	})
+// ReconcileAtState invokes the reconciler for a given state.
+func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.NamespacedName) (reconcile.Result, error) {
+	servingClient := fakeservingclient.Get(ctx)
+	kubeClient := fakekubeclient.Get(ctx)
+	servingTracker := servingClient.Tracker()
+	kubeTracker := kubeClient.Tracker()
+
+	// Create a reactor and attach it to both clients to intercept and record actions.
+	reactor := newReactor(ctx, ks.recorder, servingTracker, kubeTracker)
+
+	// Add the reactor to both clients.
+	servingClient.PrependReactor("*", "*", reactor)
+	kubeClient.PrependReactor("*", "*", reactor)
 
 	// must re-initialize the controller each time to reset its informer state
 	ctrl := ks.factory(ctx, nil)
