@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	// Knative Serving types and clients
+	fakecachingclient "knative.dev/caching/pkg/client/injection/client/fake"
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	autoscalercfg "knative.dev/serving/pkg/autoscaler/config"
@@ -30,6 +31,7 @@ import (
 	"knative.dev/serving/pkg/gc"
 	"knative.dev/serving/pkg/reconciler/route/config"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	netcfg "knative.dev/networking/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -167,19 +169,27 @@ func (ks *KnativeStrategy) PrepareState(ctx context.Context, state []runtime.Obj
 
 // newReactor creates a new reactor function that intercepts client actions,
 // records them as effects, and uses the provided trackers to fetch object states.
-func newReactor(ctx context.Context, recorder replay.EffectRecorder, servingTracker, kubeTracker testing.ObjectTracker) testing.ReactionFunc {
+func newReactor(ctx context.Context, recorder replay.EffectRecorder, trackers ...testing.ObjectTracker) testing.ReactionFunc {
 	return func(action testing.Action) (handled bool, ret runtime.Object, err error) {
 		var obj runtime.Object
 		var op event.OperationType
 
+		// lookup iterates through all provided trackers to find the object.
+		lookup := func(res schema.GroupVersionResource, ns, name string) (runtime.Object, error) {
+			for _, tracker := range trackers {
+				obj, err := tracker.Get(res, ns, name)
+				if err == nil {
+					return obj, nil
+				}
+			}
+			// If we didn't find it in any tracker, return a generic error.
+			return nil, fmt.Errorf("object %s/%s not found in any tracker for resource %v", ns, name, res)
+		}
+
 		switch action.GetVerb() {
 		case "get":
 			a := action.(testing.GetAction)
-			// Check both trackers.
-			obj, err = servingTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
-			if err != nil {
-				obj, err = kubeTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
-			}
+			obj, err = lookup(a.GetResource(), a.GetNamespace(), a.GetName())
 			op = event.GET
 		case "create":
 			a := action.(testing.CreateAction)
@@ -191,18 +201,11 @@ func newReactor(ctx context.Context, recorder replay.EffectRecorder, servingTrac
 			op = event.UPDATE
 		case "delete":
 			a := action.(testing.DeleteAction)
-			obj, err = servingTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
-			if err != nil {
-				obj, err = kubeTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
-			}
+			obj, err = lookup(a.GetResource(), a.GetNamespace(), a.GetName())
 			op = event.MARK_FOR_DELETION
 		case "patch":
 			a := action.(testing.PatchAction)
-			// Check both trackers.
-			obj, err = servingTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
-			if err != nil {
-				obj, err = kubeTracker.Get(a.GetResource(), a.GetNamespace(), a.GetName())
-			}
+			obj, err = lookup(a.GetResource(), a.GetNamespace(), a.GetName())
 			op = event.PATCH
 		default:
 			fmt.Println("WARNING Unhandled action type:", action.GetVerb(), action.GetResource().Resource)
@@ -222,15 +225,18 @@ func newReactor(ctx context.Context, recorder replay.EffectRecorder, servingTrac
 func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.NamespacedName) (reconcile.Result, error) {
 	servingClient := fakeservingclient.Get(ctx)
 	kubeClient := fakekubeclient.Get(ctx)
-	servingTracker := servingClient.Tracker()
-	kubeTracker := kubeClient.Tracker()
+	cachingClient := fakecachingclient.Get(ctx)
 
 	// Create a reactor and attach it to both clients to intercept and record actions.
-	reactor := newReactor(ctx, ks.recorder, servingTracker, kubeTracker)
+	reactor := newReactor(ctx, ks.recorder,
+		servingClient.Tracker(),
+		kubeClient.Tracker(),
+		cachingClient.Tracker())
 
 	// Add the reactor to both clients.
 	servingClient.PrependReactor("*", "*", reactor)
 	kubeClient.PrependReactor("*", "*", reactor)
+	cachingClient.PrependReactor("*", "*", reactor)
 
 	// must re-initialize the controller each time to reset its informer state
 	ctrl := ks.factory(ctx, nil)
