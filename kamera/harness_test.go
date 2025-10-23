@@ -21,42 +21,10 @@ import (
 	"knative.dev/pkg/controller"
 	reconcilertesting "knative.dev/pkg/reconciler/testing"
 
-	// Fake informers for reconcilers
-	// The actual reconciler implementations
-	// Import the fakes for the informers we need.
-	// Import the fakes for the informers we need.
-	_ "knative.dev/caching/pkg/client/injection/informers/caching/v1alpha1/image/fake"
-	_ "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/certificate/fake"
-	_ "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/ingress/fake"
-	_ "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/serverlessservice/fake"
-	_ "knative.dev/pkg/client/injection/kube/informers/apps/v1/deployment/fake"
-	_ "knative.dev/pkg/client/injection/kube/informers/core/v1/endpoints/fake"
-
-	// for kpa reconciler
-	_ "knative.dev/pkg/client/injection/kube/informers/core/v1/pod/filtered/fake"
-	_ "knative.dev/pkg/client/injection/kube/informers/factory/filtered/fake"
-
-	_ "knative.dev/pkg/client/injection/kube/informers/core/v1/service/fake"
-	_ "knative.dev/pkg/injection/clients/dynamicclient/fake"
-
 	"knative.dev/serving/pkg/apis/autoscaling"
-	// for cert-manager
-
 	"knative.dev/serving/pkg/apis/serving"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	"knative.dev/serving/pkg/autoscaler/scaling"
-
-	// these have to be here to initialize the fake informers
-	_ "knative.dev/serving/pkg/client/certmanager/injection/informers/acme/v1/challenge/fake"
-	_ "knative.dev/serving/pkg/client/certmanager/injection/informers/certmanager/v1/certificate/fake"
-	_ "knative.dev/serving/pkg/client/certmanager/injection/informers/certmanager/v1/clusterissuer/fake"
-	_ "knative.dev/serving/pkg/client/injection/ducks/autoscaling/v1alpha1/podscalable/fake"
-	_ "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/metric/fake"
-	_ "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/podautoscaler/fake"
-	_ "knative.dev/serving/pkg/client/injection/informers/serving/v1/configuration/fake"
-	_ "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision/fake"
-	_ "knative.dev/serving/pkg/client/injection/informers/serving/v1/route/fake"
-	_ "knative.dev/serving/pkg/client/injection/informers/serving/v1/service/fake"
 	"knative.dev/serving/pkg/reconciler/revision/resources"
 	"knative.dev/serving/pkg/reconciler/revision/resources/names"
 
@@ -197,6 +165,7 @@ func TestKnativeStrategyReconciliation(t *testing.T) {
 
 	t.Run("Revision Reconciler", func(t *testing.T) {
 		initialState := []runtime.Object{
+
 			&v1.Revision{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 				Spec: v1.RevisionSpec{

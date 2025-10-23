@@ -6,6 +6,8 @@ import (
 
 	// Standard Kubernetes types
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -49,6 +51,21 @@ import (
 
 // Ensure KnativeStrategy implements the Strategy interface
 var _ tracecheck.Strategy = (*KnativeStrategy)(nil)
+
+var harnessScheme = runtime.NewScheme()
+
+func init() {
+	mustAddToScheme(corev1.AddToScheme)
+	mustAddToScheme(appsv1.AddToScheme)
+	mustAddToScheme(v1.AddToScheme)
+	mustAddToScheme(autoscalingv1alpha1.AddToScheme)
+}
+
+func mustAddToScheme(fn func(*runtime.Scheme) error) {
+	if err := fn(harnessScheme); err != nil {
+		panic(fmt.Sprintf("registering scheme: %v", err))
+	}
+}
 
 // ControllerFactory is a function that creates a new controller.
 type ControllerFactory func(ctx context.Context, cmw configmap.Watcher) *controller.Impl
@@ -227,6 +244,8 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 	kubeClient := fakekubeclient.Get(ctx)
 	cachingClient := fakecachingclient.Get(ctx)
 
+	fmt.Println("Reconciling", nsName.String())
+
 	// Create a reactor and attach it to both clients to intercept and record actions.
 	reactor := newReactor(ctx, ks.recorder,
 		servingClient.Tracker(),
@@ -297,6 +316,14 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 
 	// i am sorry for the following code
 	for _, obj := range objs {
+		if u, ok := obj.(*unstructured.Unstructured); ok {
+			typed, err := convertUnstructured(u)
+			if err != nil {
+				return fmt.Errorf("failed to convert unstructured %s: %w", u.GroupVersionKind().String(), err)
+			}
+			obj = typed
+		}
+
 		switch o := obj.(type) {
 		case *v1.Service:
 			if _, err := servingclient.ServingV1().Services(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
@@ -351,9 +378,34 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 				return fmt.Errorf("failed to create deployment: %w", err)
 			}
 		default:
-			panic(fmt.Sprintf("unsupported type %T -- need to add a case for it", o))
+			return fmt.Errorf("unsupported type %T", o)
 		}
 	}
 	return nil
 
+}
+
+func convertUnstructured(u *unstructured.Unstructured) (runtime.Object, error) {
+	gvk := u.GroupVersionKind()
+	if gvk.Empty() {
+		return nil, fmt.Errorf("object has no GroupVersionKind")
+	}
+
+	obj, err := harnessScheme.New(gvk)
+	if err != nil {
+		return nil, fmt.Errorf("creating typed object for %s: %w", gvk.String(), err)
+	}
+
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, obj); err != nil {
+		return nil, fmt.Errorf("converting from unstructured: %w", err)
+	}
+
+	if accessor, err := meta.Accessor(obj); err == nil {
+		accessor.SetNamespace(u.GetNamespace())
+		accessor.SetName(u.GetName())
+		accessor.SetResourceVersion(u.GetResourceVersion())
+	}
+	obj.GetObjectKind().SetGroupVersionKind(gvk)
+
+	return obj, nil
 }
