@@ -3,9 +3,9 @@ package kamera
 import (
 	"context"
 	"fmt"
+	"strings"
 
-	// Standard Kubernetes types
-
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,8 +23,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kamerascheme "knative.dev/serving/kamera/scheme"
 
 	// Knative Serving types and clients
+	cachingv1alpha1 "knative.dev/caching/pkg/apis/caching/v1alpha1"
 	fakecachingclient "knative.dev/caching/pkg/client/injection/client/fake"
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
@@ -36,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	netcfg "knative.dev/networking/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	// Knative pkg imports
@@ -44,28 +47,12 @@ import (
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/system"
 
-	// The actual reconciler implementations
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	cfgmap "knative.dev/serving/pkg/apis/config"
 )
 
 // Ensure KnativeStrategy implements the Strategy interface
 var _ tracecheck.Strategy = (*KnativeStrategy)(nil)
-
-var harnessScheme = runtime.NewScheme()
-
-func init() {
-	mustAddToScheme(corev1.AddToScheme)
-	mustAddToScheme(appsv1.AddToScheme)
-	mustAddToScheme(v1.AddToScheme)
-	mustAddToScheme(autoscalingv1alpha1.AddToScheme)
-}
-
-func mustAddToScheme(fn func(*runtime.Scheme) error) {
-	if err := fn(harnessScheme); err != nil {
-		panic(fmt.Sprintf("registering scheme: %v", err))
-	}
-}
 
 // ControllerFactory is a function that creates a new controller.
 type ControllerFactory func(ctx context.Context, cmw configmap.Watcher) *controller.Impl
@@ -75,6 +62,7 @@ type KnativeStrategy struct {
 	factory   ControllerFactory
 	recorder  replay.EffectRecorder
 	selectors []string
+	logger    logr.Logger
 }
 
 // NewKnativeStrategy creates a new KnativeStrategy for a given controller factory.
@@ -82,8 +70,6 @@ func NewKnativeStrategy(factory ControllerFactory, recorder replay.EffectRecorde
 	if factory == nil {
 		return nil, fmt.Errorf("controller factory cannot be nil")
 	}
-
-	// The context passed in from the test should already have fakes injected.
 
 	cmw := configmap.NewStaticWatcher(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -176,20 +162,43 @@ func NewKnativeStrategy(factory ControllerFactory, recorder replay.EffectRecorde
 		factory:   partial,
 		selectors: selectors,
 		recorder:  recorder,
+		logger:    log.Log.WithName("knative-strategy"),
 	}, nil
+}
+
+// SetLogger overrides the default logger used by the strategy. Call this before PrepareState.
+func (ks *KnativeStrategy) SetLogger(logger logr.Logger) {
+	if logger.GetSink() == nil {
+		return
+	}
+	ks.logger = logger
 }
 
 // PrepareState sets up the fake clients and informers for the reconciler under test.
 func (ks *KnativeStrategy) PrepareState(ctx context.Context, state []runtime.Object) (context.Context, func(), error) {
-	return SetupClientState(ctx, state, ks.selectors...)
+	ctx = log.IntoContext(ctx, ks.logger)
+	fmt.Println("setting up client state")
+	ctx, cancel, err := SetupClientState(ctx, state, ks.selectors...)
+	if err != nil {
+		return nil, cancel, err
+	}
+	ctx = log.IntoContext(ctx, ks.logger)
+	return ctx, cancel, nil
 }
 
 // newReactor creates a new reactor function that intercepts client actions,
 // records them as effects, and uses the provided trackers to fetch object states.
 func newReactor(ctx context.Context, recorder replay.EffectRecorder, trackers ...testing.ObjectTracker) testing.ReactionFunc {
+	baseLogger := log.FromContext(ctx).WithName("fake-reactor")
+
 	return func(action testing.Action) (handled bool, ret runtime.Object, err error) {
 		var obj runtime.Object
 		var op event.OperationType
+		logger := baseLogger.WithValues(
+			"verb", action.GetVerb(),
+			"resource", action.GetResource().Resource,
+			"namespace", action.GetNamespace(),
+		)
 
 		// lookup iterates through all provided trackers to find the object.
 		lookup := func(res schema.GroupVersionResource, ns, name string) (runtime.Object, error) {
@@ -208,6 +217,18 @@ func newReactor(ctx context.Context, recorder replay.EffectRecorder, trackers ..
 			a := action.(testing.GetAction)
 			obj, err = lookup(a.GetResource(), a.GetNamespace(), a.GetName())
 			op = event.GET
+		case "list":
+			a := action.(testing.ListAction)
+			gvr := a.GetResource()
+			gvk := schema.GroupVersionKind{
+				Group:   gvr.Group,
+				Version: gvr.Version,
+				Kind:    listKindForResource(gvr.Resource),
+			}
+			ul := &unstructured.Unstructured{}
+			ul.SetGroupVersionKind(gvk)
+			obj = ul
+			op = event.LIST
 		case "create":
 			a := action.(testing.CreateAction)
 			obj = a.GetObject()
@@ -225,12 +246,24 @@ func newReactor(ctx context.Context, recorder replay.EffectRecorder, trackers ..
 			obj, err = lookup(a.GetResource(), a.GetNamespace(), a.GetName())
 			op = event.PATCH
 		default:
-			fmt.Println("WARNING Unhandled action type:", action.GetVerb(), action.GetResource().Resource)
+			logger.V(1).Info("unhandled action type")
 			return false, nil, nil
 		}
 
 		if err == nil && obj != nil {
-			recorder.RecordEffect(ctx, obj.(client.Object), op, nil)
+			if co, ok := obj.(client.Object); ok {
+				ensureGVK(co)
+				logger.V(1).Info("recording effect",
+					"operation", op,
+					"name", co.GetName(),
+					"kind", co.GetObjectKind().GroupVersionKind().Kind,
+				)
+				recorder.RecordEffect(ctx, co, op, nil)
+			} else {
+				logger.V(1).Info("object does not implement client.Object", "operation", op, "type", fmt.Sprintf("%T", obj))
+			}
+		} else if err != nil {
+			logger.V(1).Info("failed to resolve object for action", "error", err)
 		}
 
 		// Return false to let the default reactor handle the action.
@@ -244,7 +277,8 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 	kubeClient := fakekubeclient.Get(ctx)
 	cachingClient := fakecachingclient.Get(ctx)
 
-	fmt.Println("Reconciling", nsName.String())
+	logger := log.FromContext(ctx).WithName("reconcile").WithValues("key", nsName.String())
+	fmt.Println("reconciling at state for", nsName.String())
 
 	// Create a reactor and attach it to both clients to intercept and record actions.
 	reactor := newReactor(ctx, ks.recorder,
@@ -259,9 +293,11 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 
 	// must re-initialize the controller each time to reset its informer state
 	ctrl := ks.factory(ctx, nil)
+	logger = logger.WithValues("reconciler", ctrl.Name)
 	if la, ok := ctrl.Reconciler.(reconciler.LeaderAware); ok {
 		la.Promote(reconciler.UniversalBucket(), func(reconciler.Bucket, types.NamespacedName) {})
 	} else {
+		logger.Error(fmt.Errorf("not leader-aware"), "reconcile aborted")
 		return reconcile.Result{}, fmt.Errorf("Reconciler is not leader-aware")
 	}
 
@@ -270,23 +306,18 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 
 	requeue, requeueAfter := controller.IsRequeueKey(err)
 	if err != nil && !requeue {
+		logger.Error(err, "reconcile failed")
 		return reconcile.Result{}, err // Return actual error if it's not a requeue request
 	}
 
-	return reconcile.Result{
+	result := reconcile.Result{
 		Requeue:      requeue,
 		RequeueAfter: requeueAfter,
-	}, nil
-}
+	}
 
-// RetrieveEffects extracts the results of a reconciliation.
-// func (ks *KnativeStrategy) RetrieveEffects(ctx context.Context) (tracecheck.Changes, error) {
-// 	client := fakeservingclient.Get(ctx)
-// 	if client == nil {
-// 		return tracecheck.Changes{}, fmt.Errorf("fake serving client not found in context")
-// 	}
-// 	return client.Actions(), nil
-// }
+	logger.Info("reconcile completed", "requeue", result.Requeue, "requeueAfter", result.RequeueAfter)
+	return result, nil
+}
 
 func SetupClientState(ctx context.Context, state []runtime.Object, selectors ...string) (context.Context, func(), error) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -313,6 +344,7 @@ func SetupClientState(ctx context.Context, state []runtime.Object, selectors ...
 func insertObjects(ctx context.Context, objs []runtime.Object) error {
 	servingclient := fakeservingclient.Get(ctx)
 	kubeclient := fakekubeclient.Get(ctx)
+	cachingclient := fakecachingclient.Get(ctx)
 
 	// i am sorry for the following code
 	for _, obj := range objs {
@@ -377,6 +409,10 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 			if _, err := kubeclient.AppsV1().Deployments(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
 				return fmt.Errorf("failed to create deployment: %w", err)
 			}
+		case *cachingv1alpha1.Image:
+			if _, err := cachingclient.CachingV1alpha1().Images(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("failed to create image: %w", err)
+			}
 		default:
 			return fmt.Errorf("unsupported type %T", o)
 		}
@@ -385,13 +421,82 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 
 }
 
+var kindToGVK = map[string]schema.GroupVersionKind{
+	"Deployment":    appsv1.SchemeGroupVersion.WithKind("Deployment"),
+	"Image":         cachingv1alpha1.SchemeGroupVersion.WithKind("Image"),
+	"PodAutoscaler": autoscalingv1alpha1.SchemeGroupVersion.WithKind("PodAutoscaler"),
+	"Metric":        autoscalingv1alpha1.SchemeGroupVersion.WithKind("Metric"),
+	"Configuration": v1.SchemeGroupVersion.WithKind("Configuration"),
+	"Revision":      v1.SchemeGroupVersion.WithKind("Revision"),
+	"Route":         v1.SchemeGroupVersion.WithKind("Route"),
+	"Service":       v1.SchemeGroupVersion.WithKind("Service"),
+}
+
+var resourceToListKind = map[string]string{
+	"deployments":     "DeploymentList",
+	"images":          "ImageList",
+	"podautoscalers":  "PodAutoscalerList",
+	"metrics":         "MetricList",
+	"configurations":  "ConfigurationList",
+	"revisions":       "RevisionList",
+	"routes":          "RouteList",
+	"services":        "ServiceList",
+	"pods":            "PodList",
+	"endpoints":       "EndpointsList",
+	"configmaps":      "ConfigMapList",
+	"secrets":         "SecretList",
+	"serviceaccounts": "ServiceAccountList",
+}
+
+func ensureGVK(obj client.Object) {
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	if gvk.Kind != "" && gvk.Version != "" {
+		return
+	}
+	switch o := obj.(type) {
+	case *corev1.ConfigMap:
+		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ConfigMap"))
+	case *corev1.Secret:
+		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Secret"))
+	case *corev1.ServiceAccount:
+		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ServiceAccount"))
+	case *corev1.Pod:
+		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
+	case *corev1.Endpoints:
+		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Endpoints"))
+	case *corev1.Service:
+		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
+	case *appsv1.Deployment:
+		o.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("Deployment"))
+	case *v1.Service:
+		o.SetGroupVersionKind(v1.SchemeGroupVersion.WithKind("Service"))
+	case *v1.Route:
+		o.SetGroupVersionKind(v1.SchemeGroupVersion.WithKind("Route"))
+	case *v1.Configuration:
+		o.SetGroupVersionKind(v1.SchemeGroupVersion.WithKind("Configuration"))
+	case *v1.Revision:
+		o.SetGroupVersionKind(v1.SchemeGroupVersion.WithKind("Revision"))
+	case *autoscalingv1alpha1.PodAutoscaler:
+		o.SetGroupVersionKind(autoscalingv1alpha1.SchemeGroupVersion.WithKind("PodAutoscaler"))
+	case *autoscalingv1alpha1.Metric:
+		o.SetGroupVersionKind(autoscalingv1alpha1.SchemeGroupVersion.WithKind("Metric"))
+	case *cachingv1alpha1.Image:
+		o.SetGroupVersionKind(cachingv1alpha1.SchemeGroupVersion.WithKind("Image"))
+	}
+}
+
 func convertUnstructured(u *unstructured.Unstructured) (runtime.Object, error) {
 	gvk := u.GroupVersionKind()
+	if (gvk.Group == "" || gvk.Kind == "") && u.GetKind() != "" {
+		if mapped, ok := kindToGVK[u.GetKind()]; ok {
+			gvk = mapped
+		}
+	}
 	if gvk.Empty() {
 		return nil, fmt.Errorf("object has no GroupVersionKind")
 	}
 
-	obj, err := harnessScheme.New(gvk)
+	obj, err := kamerascheme.Default.New(gvk)
 	if err != nil {
 		return nil, fmt.Errorf("creating typed object for %s: %w", gvk.String(), err)
 	}
@@ -408,4 +513,14 @@ func convertUnstructured(u *unstructured.Unstructured) (runtime.Object, error) {
 	obj.GetObjectKind().SetGroupVersionKind(gvk)
 
 	return obj, nil
+}
+
+func listKindForResource(resource string) string {
+	if kind, ok := resourceToListKind[resource]; ok {
+		return kind
+	}
+	if resource == "" {
+		return "List"
+	}
+	return strings.ToUpper(resource[:1]) + resource[1:] + "List"
 }
