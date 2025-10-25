@@ -177,7 +177,6 @@ func (ks *KnativeStrategy) SetLogger(logger logr.Logger) {
 // PrepareState sets up the fake clients and informers for the reconciler under test.
 func (ks *KnativeStrategy) PrepareState(ctx context.Context, state []runtime.Object) (context.Context, func(), error) {
 	ctx = log.IntoContext(ctx, ks.logger)
-	fmt.Println("setting up client state")
 	ctx, cancel, err := SetupClientState(ctx, state, ks.selectors...)
 	if err != nil {
 		return nil, cancel, err
@@ -278,7 +277,6 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 	cachingClient := fakecachingclient.Get(ctx)
 
 	logger := log.FromContext(ctx).WithName("reconcile").WithValues("key", nsName.String())
-	fmt.Println("reconciling at state for", nsName.String())
 
 	// Create a reactor and attach it to both clients to intercept and record actions.
 	reactor := newReactor(ctx, ks.recorder,
@@ -409,6 +407,10 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 			if _, err := kubeclient.AppsV1().Deployments(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
 				return fmt.Errorf("failed to create deployment: %w", err)
 			}
+		case *appsv1.ReplicaSet:
+			if _, err := kubeclient.AppsV1().ReplicaSets(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("failed to create replicaset: %w", err)
+			}
 		case *cachingv1alpha1.Image:
 			if _, err := cachingclient.CachingV1alpha1().Images(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
 				return fmt.Errorf("failed to create image: %w", err)
@@ -423,6 +425,7 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 
 var kindToGVK = map[string]schema.GroupVersionKind{
 	"Deployment":    appsv1.SchemeGroupVersion.WithKind("Deployment"),
+	"ReplicaSet":    appsv1.SchemeGroupVersion.WithKind("ReplicaSet"),
 	"Image":         cachingv1alpha1.SchemeGroupVersion.WithKind("Image"),
 	"PodAutoscaler": autoscalingv1alpha1.SchemeGroupVersion.WithKind("PodAutoscaler"),
 	"Metric":        autoscalingv1alpha1.SchemeGroupVersion.WithKind("Metric"),
@@ -434,6 +437,7 @@ var kindToGVK = map[string]schema.GroupVersionKind{
 
 var resourceToListKind = map[string]string{
 	"deployments":     "DeploymentList",
+	"replicasets":     "ReplicaSetList",
 	"images":          "ImageList",
 	"podautoscalers":  "PodAutoscalerList",
 	"metrics":         "MetricList",
@@ -468,6 +472,8 @@ func ensureGVK(obj client.Object) {
 		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 	case *appsv1.Deployment:
 		o.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("Deployment"))
+	case *appsv1.ReplicaSet:
+		o.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
 	case *v1.Service:
 		o.SetGroupVersionKind(v1.SchemeGroupVersion.WithKind("Service"))
 	case *v1.Route:
