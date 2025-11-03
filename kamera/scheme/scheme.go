@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	cachingv1alpha1 "knative.dev/caching/pkg/apis/caching/v1alpha1"
+	networkingv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 )
@@ -21,6 +22,7 @@ func init() {
 	mustAddToScheme(servingv1.AddToScheme)
 	mustAddToScheme(autoscalingv1alpha1.AddToScheme)
 	mustAddToScheme(cachingv1alpha1.AddToScheme)
+	mustAddToScheme(networkingv1alpha1.AddToScheme)
 }
 
 func mustAddToScheme(fn func(*runtime.Scheme) error) {
