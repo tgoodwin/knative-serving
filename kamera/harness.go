@@ -664,6 +664,10 @@ func insertObjects(ctx context.Context, objs []runtime.Object) error {
 			if _, err := networkingclient.NetworkingV1alpha1().ServerlessServices(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
 				return fmt.Errorf("failed to create serverlessservice: %w", err)
 			}
+		case *netv1alpha1.Ingress:
+			if _, err := networkingclient.NetworkingV1alpha1().Ingresses(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("failed to create knative ingress: %w", err)
+			}
 		case *corev1.ConfigMap:
 			if _, err := kubeclient.CoreV1().ConfigMaps(o.Namespace).Create(ctx, o, metav1.CreateOptions{}); err != nil {
 				return fmt.Errorf("failed to create configmap: %w", err)
@@ -844,6 +848,8 @@ func ensureGVK(obj client.Object) {
 		o.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
 	case *networkingv1.Ingress:
 		o.SetGroupVersionKind(networkingv1.SchemeGroupVersion.WithKind("Ingress"))
+	case *netv1alpha1.Ingress:
+		o.SetGroupVersionKind(netv1alpha1.SchemeGroupVersion.WithKind("Ingress"))
 	case *appsv1.Deployment:
 		o.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("Deployment"))
 	case *appsv1.ReplicaSet:
