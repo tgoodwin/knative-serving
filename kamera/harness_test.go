@@ -24,7 +24,6 @@ import (
 	"knative.dev/serving/pkg/apis/autoscaling"
 	"knative.dev/serving/pkg/apis/serving"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
-	"knative.dev/serving/pkg/autoscaler/scaling"
 	"knative.dev/serving/pkg/reconciler/revision/resources"
 	"knative.dev/serving/pkg/reconciler/revision/resources/names"
 
@@ -83,7 +82,7 @@ func TestNewKnativeStrategy(t *testing.T) {
 		{
 			name: "KPA Reconciler",
 			factory: func(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
-				multiScaler := scaling.NewMultiScaler(ctx.Done(), nil, logging.FromContext(ctx))
+				multiScaler := NewFakeMultiScaler(ctx.Done(), logging.FromContext(ctx))
 				return kpareconciler.NewController(ctx, cmw, multiScaler)
 			},
 		},
@@ -228,7 +227,7 @@ func TestKnativeStrategyReconciliation(t *testing.T) {
 		initialState := []runtime.Object{rev, dep, pa}
 
 		factory := func(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
-			multiScaler := scaling.NewMultiScaler(ctx.Done(), nil, logging.FromContext(ctx))
+			multiScaler := NewFakeMultiScaler(ctx.Done(), logging.FromContext(ctx))
 			return kpareconciler.NewController(ctx, cmw, multiScaler)
 		}
 		strategy, err := NewKnativeStrategy(factory, &FakeRecorder{}, serving.RevisionUID)
