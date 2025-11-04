@@ -590,8 +590,16 @@ func setupClientState(ctx context.Context, state []runtime.Object, selectors ...
 	ctx, informers := injection.Fake.SetupInformers(ctx, &rest.Config{})
 
 	logger := log.FromContext(ctx).WithName("setup")
+	type informerMeta struct {
+		typeName string
+		informer controller.Informer
+	}
+	metas := make([]informerMeta, len(informers))
+
 	for idx, informer := range informers {
-		logger.Info("registered informer", "index", idx, "type", fmt.Sprintf("%T", informer))
+		typeName := fmt.Sprintf("%T", informer)
+		logger.Info("registered informer", "index", idx, "type", typeName)
+		metas[idx] = informerMeta{typeName: typeName, informer: informer}
 	}
 
 	if err := insertObjects(ctx, state); err != nil {
@@ -605,6 +613,9 @@ func setupClientState(ctx context.Context, state []runtime.Object, selectors ...
 	waitInformers, err := reconcilertesting.RunAndSyncInformers(ctx, informers...)
 	if err != nil {
 		logger.Error(err, "RunAndSyncInformers failed")
+		for idx, meta := range metas {
+			logger.Error(err, "informer sync status", "index", idx, "type", meta.typeName, "synced", meta.informer.HasSynced())
+		}
 		cancel()
 		return nil, nil, fmt.Errorf("failed to sync informers: %w", err)
 	}
