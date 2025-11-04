@@ -228,8 +228,8 @@ func main() {
 		strategy.SetLogger(logf.Log.WithName("ServerlessServiceReconciler"))
 		return strategy
 	})
-	eb.AssignReconcilerToKind("ServerlessServiceReconciler", "ServerlessService")
-	eb.WithResourceDep("ServerlessService", "ServerlessServiceReconciler", "KPA")
+	eb.AssignReconcilerToKind("ServerlessServiceReconciler", "networking.internal.knative.dev/ServerlessService")
+	eb.WithResourceDep("networking.internal.knative.dev/ServerlessService", "ServerlessServiceReconciler", "KPA")
 
 	eb.WithCustomStrategy("ConfigurationReconciler", func(r replay.EffectRecorder) tracecheck.Strategy {
 		strategy, err := kamera.NewKnativeStrategy(configuration.NewController, r)
@@ -239,26 +239,26 @@ func main() {
 		strategy.SetLogger(logf.Log.WithName("ConfigurationReconciler"))
 		return strategy
 	})
-	eb.AssignReconcilerToKind("ConfigurationReconciler", "Configuration")
+	eb.AssignReconcilerToKind("ConfigurationReconciler", "serving.knative.dev/Configuration")
 	eb.WithResourceDep("Configuration", "ConfigurationReconciler", "RevisionReconciler")
 
-	eb.AssignReconcilerToKind("RevisionReconciler", "Revision")
-	eb.AssignReconcilerToKind("KPA", "PodAutoscaler")
-	eb.AssignReconcilerToKind("ServiceReconciler", "Service")
-	eb.AssignReconcilerToKind("RouteReconciler", "Route")
-	eb.AssignReconcilerToKind("RouteReconciler", "Ingress")
+	eb.AssignReconcilerToKind("RevisionReconciler", "serving.knative.dev/Revision")
+	eb.AssignReconcilerToKind("KPA", "autoscaling.internal.knative.dev/PodAutoscaler")
+	eb.AssignReconcilerToKind("ServiceReconciler", "serving.knative.dev/Service")
+	eb.AssignReconcilerToKind("RouteReconciler", "serving.knative.dev/Route")
+	eb.AssignReconcilerToKind("RouteReconciler", "networking.internal.knative.dev/Ingress")
 
 	eb.WithReconciler("RevisionDigestStub", func(c tracecheck.Client) tracecheck.Reconciler {
 		return &revisionDigestStub{Client: c}
 	})
-	eb.AssignReconcilerToKind("RevisionDigestStub", "Revision")
+	eb.AssignReconcilerToKind("RevisionDigestStub", "serving.knative.dev/Revision")
 
-	eb.WithResourceDep("Revision", "RevisionDigestStub", "RevisionReconciler", "KPA", "ServiceReconciler")
-	eb.WithResourceDep("PodAutoscaler", "KPA", "ServerlessServiceReconciler")
-	eb.WithResourceDep("Service", "ServiceReconciler")
-	eb.WithResourceDep("Configuration", "ServiceReconciler", "RevisionReconciler")
-	eb.WithResourceDep("Route", "RouteReconciler", "ServiceReconciler")
-	eb.WithResourceDep("Ingress", "RouteReconciler", "ServerlessServiceReconciler")
+	eb.WithResourceDep("serving.knative.dev/Revision", "RevisionDigestStub", "RevisionReconciler", "KPA", "ServiceReconciler")
+	eb.WithResourceDep("autoscaling.internal.knative.dev/PodAutoscaler", "KPA", "ServerlessServiceReconciler")
+	eb.WithResourceDep("serving.knative.dev/Service", "ServiceReconciler")
+	eb.WithResourceDep("serving.knative.dev/Configuration", "ServiceReconciler", "RevisionReconciler")
+	eb.WithResourceDep("serving.knative.dev/Route", "RouteReconciler", "ServiceReconciler")
+	eb.WithResourceDep("networking.internal.knative.dev/Ingress", "RouteReconciler", "ServerlessServiceReconciler")
 
 	eb.WithMaxDepth(100)
 
@@ -343,7 +343,7 @@ func mergeStateNodes(primary tracecheck.StateNode, others ...tracecheck.StateNod
 
 	kindSeq := make(tracecheck.KindSequences)
 	for key := range objects {
-		kind := key.IdentityKey.Kind
+		canonicalKind := key.IdentityKey.CanonicalGroupKind()
 		var (
 			seq   int64
 			found bool
@@ -352,7 +352,7 @@ func mergeStateNodes(primary tracecheck.StateNode, others ...tracecheck.StateNod
 			if node.Contents.KindSequences == nil {
 				continue
 			}
-			if val, ok := node.Contents.KindSequences[kind]; ok {
+			if val, ok := node.Contents.KindSequences[canonicalKind]; ok {
 				seq = val
 				found = true
 				break
@@ -361,7 +361,7 @@ func mergeStateNodes(primary tracecheck.StateNode, others ...tracecheck.StateNod
 		if !found {
 			seq = 1
 		}
-		kindSeq[kind] = seq
+		kindSeq[canonicalKind] = seq
 	}
 
 	merged.PendingReconciles = pending
