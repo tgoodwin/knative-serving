@@ -231,7 +231,7 @@ func (ks *KnativeStrategy) SetLogger(logger logr.Logger) {
 // PrepareState sets up the fake clients and informers for the reconciler under test.
 func (ks *KnativeStrategy) PrepareState(ctx context.Context, state []runtime.Object) (context.Context, func(), error) {
 	ctx = log.IntoContext(ctx, ks.logger)
-	ctx, cancel, err := SetupClientState(ctx, state, ks.selectors...)
+	ctx, cancel, err := setupClientState(ctx, state, ks.selectors...)
 	if err != nil {
 		return nil, cancel, err
 	}
@@ -583,7 +583,7 @@ func (ks *KnativeStrategy) ReconcileAtState(ctx context.Context, nsName types.Na
 	return reconcile.Result{}, nil
 }
 
-func SetupClientState(ctx context.Context, state []runtime.Object, selectors ...string) (context.Context, func(), error) {
+func setupClientState(ctx context.Context, state []runtime.Object, selectors ...string) (context.Context, func(), error) {
 	ctx, cancel := context.WithCancel(ctx)
 	ctx = filteredinformerfactory.WithSelectors(ctx, selectors...)
 	ctx = injection.WithConfig(ctx, &rest.Config{})
