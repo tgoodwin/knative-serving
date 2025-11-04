@@ -219,6 +219,7 @@ func main() {
 		strategy.SetLogger(logf.Log.WithName("RouteReconciler"))
 		return strategy
 	})
+
 	eb.WithCustomStrategy("ServerlessServiceReconciler", func(r replay.EffectRecorder) tracecheck.Strategy {
 		strategy, err := kamera.NewKnativeStrategy(serverlessservicecontroller.NewController, r)
 		if err != nil {
@@ -227,6 +228,8 @@ func main() {
 		strategy.SetLogger(logf.Log.WithName("ServerlessServiceReconciler"))
 		return strategy
 	})
+	eb.AssignReconcilerToKind("ServerlessServiceReconciler", "ServerlessService")
+	eb.WithResourceDep("ServerlessService", "ServerlessServiceReconciler", "KPA")
 
 	eb.WithCustomStrategy("ConfigurationReconciler", func(r replay.EffectRecorder) tracecheck.Strategy {
 		strategy, err := kamera.NewKnativeStrategy(configuration.NewController, r)
@@ -243,7 +246,7 @@ func main() {
 	eb.AssignReconcilerToKind("KPA", "PodAutoscaler")
 	eb.AssignReconcilerToKind("ServiceReconciler", "Service")
 	eb.AssignReconcilerToKind("RouteReconciler", "Route")
-	eb.AssignReconcilerToKind("ServerlessServiceReconciler", "ServerlessService")
+	eb.AssignReconcilerToKind("RouteReconciler", "Ingress")
 
 	eb.WithReconciler("RevisionDigestStub", func(c tracecheck.Client) tracecheck.Reconciler {
 		return &revisionDigestStub{Client: c}
@@ -255,7 +258,7 @@ func main() {
 	eb.WithResourceDep("Service", "ServiceReconciler")
 	eb.WithResourceDep("Configuration", "ServiceReconciler", "RevisionReconciler")
 	eb.WithResourceDep("Route", "RouteReconciler", "ServiceReconciler")
-	eb.WithResourceDep("ServerlessService", "ServerlessServiceReconciler", "KPA")
+	eb.WithResourceDep("Ingress", "RouteReconciler", "ServerlessServiceReconciler")
 
 	eb.WithMaxDepth(100)
 
