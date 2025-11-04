@@ -161,6 +161,7 @@ func (r *revisionDigestStub) Reconcile(ctx context.Context, req reconcile.Reques
 
 func main() {
 	logLevel := flag.String("log-level", "info", "logging level (debug, info, warn, error)")
+	interactiveFlag := flag.Bool("interactive", true, "launch interactive trace inspector")
 	flag.Parse()
 
 	level, err := parseLogLevel(*logLevel)
@@ -246,12 +247,16 @@ func main() {
 	eb.AssignReconcilerToKind("KPA", "autoscaling.internal.knative.dev/PodAutoscaler")
 	eb.AssignReconcilerToKind("ServiceReconciler", "serving.knative.dev/Service")
 	eb.AssignReconcilerToKind("RouteReconciler", "serving.knative.dev/Route")
-	eb.AssignReconcilerToKind("RouteReconciler", "networking.internal.knative.dev/Ingress")
 
 	eb.WithReconciler("RevisionDigestStub", func(c tracecheck.Client) tracecheck.Reconciler {
 		return &revisionDigestStub{Client: c}
 	})
 	eb.AssignReconcilerToKind("RevisionDigestStub", "serving.knative.dev/Revision")
+
+	eb.WithReconciler("IngressStatusStub", func(c tracecheck.Client) tracecheck.Reconciler {
+		return &kamera.IngressStatusStub{Client: c}
+	})
+	eb.AssignReconcilerToKind("IngressStatusStub", "networking.internal.knative.dev/Ingress")
 
 	eb.WithResourceDep("serving.knative.dev/Revision", "RevisionDigestStub", "RevisionReconciler", "KPA", "ServiceReconciler")
 	eb.WithResourceDep("autoscaling.internal.knative.dev/PodAutoscaler", "KPA", "ServerlessServiceReconciler")
@@ -302,6 +307,12 @@ func main() {
 	states = append(states, res.AbortedStates...)
 	if len(states) == 0 {
 		fmt.Println("no states returned from exploration")
+		return
+	}
+
+	if !*interactiveFlag {
+		fmt.Printf("interactive inspector disabled; states available: %d (converged=%d, aborted=%d)\n",
+			len(states), len(res.ConvergedStates), len(res.AbortedStates))
 		return
 	}
 
