@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -61,7 +62,7 @@ func ProbeTargetTillReady(target string, duration time.Duration) error {
 // WaitForScaleToZero will wait for the deployments in the indexer to scale to 0
 func WaitForScaleToZero(ctx context.Context, namespace string, selector labels.Selector, duration time.Duration) error {
 	pl := podinformer.Get(ctx).Lister()
-	begin := time.Now()
+	begin := simclock.Now()
 	return wait.PollUntilContextTimeout(ctx, time.Second, duration, true, func(context.Context) (bool, error) {
 		pods, err := pl.Pods(namespace).List(selector)
 		if err != nil {

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/tgoodwin/kamera/pkg/simclock"
 )
 
 type (
@@ -331,7 +332,7 @@ func (t *TimedFloat64Buckets) ResizeWindow(w time.Duration) {
 	defer t.bucketsMutex.Unlock()
 	// If we had written any data within `window` time, then exercise the O(N)
 	// copy algorithm. Otherwise, just assign zeroes.
-	if time.Now().Truncate(t.granularity).Sub(t.lastWrite) <= t.window {
+	if simclock.Now().Truncate(t.granularity).Sub(t.lastWrite) <= t.window {
 		// If the window is shrinking, then we need to copy only
 		// `newBuckets` buckets.
 		oldNumBuckets := len(t.buckets)

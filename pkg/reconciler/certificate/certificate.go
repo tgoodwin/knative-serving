@@ -22,10 +22,10 @@ import (
 	"fmt"
 	"hash/adler32"
 	"strconv"
-	"time"
 
 	cmv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/tgoodwin/kamera/pkg/simclock"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -128,7 +128,7 @@ func (c *Reconciler) reconcile(ctx context.Context, knCert *v1alpha1.Certificate
 		knCert.Status.MarkNotReady(cmCertReadyCondition.Reason, cmCertReadyCondition.Message)
 		return c.setHTTP01Challenges(ctx, knCert, cmCert)
 	case cmCertReadyCondition.Status == cmmeta.ConditionTrue:
-		if cmCert.Status.RenewalTime != nil && time.Now().After(cmCert.Status.RenewalTime.Time) {
+		if cmCert.Status.RenewalTime != nil && simclock.Now().After(cmCert.Status.RenewalTime.Time) {
 			// add a temporary renewing state when cm certificate is being renewed
 			// this will reconfigure the ingress in order to route HTTP01 challenge traffic
 			// before cm certificate expiration

@@ -201,7 +201,7 @@ func (r conditionsImpl) SetCondition(cond Condition) {
 			}
 		}
 	}
-	cond.LastTransitionTime = VolatileTime{Inner: metav1.NewTime(time.Now())}
+	cond.LastTransitionTime = VolatileTime{Inner: metav1.NewTime(time.Unix(0, 0))}
 	conditions = append(conditions, cond)
 	// Sorted for convenience of the consumer, i.e. kubectl.
 	sort.Slice(conditions, func(i, j int) bool { return conditions[i].Type < conditions[j].Type })

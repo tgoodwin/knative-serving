@@ -27,6 +27,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	netheader "knative.dev/networking/pkg/http/header"
 )
 
@@ -134,7 +135,7 @@ func (h *RequestLogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rr := NewResponseRecorder(w, http.StatusOK)
-	startTime := time.Now()
+	startTime := simclock.Now()
 
 	defer func() {
 		// Filter probe requests for request logs if disabled.

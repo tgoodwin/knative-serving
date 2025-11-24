@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
@@ -197,7 +198,7 @@ func newServiceScraperWithClient(
 		podsAddressable:  true,
 		usePassthroughLb: usePassthroughLb,
 		logger:           logger,
-		clock:            clock.RealClock{},
+		clock:            simclock.DeterministicClock{},
 		duration:         metric,
 		attrs: attribute.NewSet(
 			semconv.K8SNamespaceName(m.ObjectMeta.Namespace),
@@ -258,7 +259,7 @@ func (s *serviceScraper) Scrape(window time.Duration) (stat Stat, err error) {
 }
 
 func (s *serviceScraper) scrapePods(window time.Duration) (Stat, error) {
-	pods, youngPods, err := s.podAccessor.PodIPsSplitByAge(window, time.Now())
+	pods, youngPods, err := s.podAccessor.PodIPsSplitByAge(window, simclock.Now())
 	if err != nil {
 		s.logger.Infow("Error querying pods by age", zap.Error(err))
 		return emptyStat, err

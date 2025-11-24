@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
@@ -112,7 +113,7 @@ func NewMetricCollector(
 		logger:              logger,
 		collections:         make(map[types.NamespacedName]*collection),
 		statsScraperFactory: statsScraperFactory,
-		clock:               clock.RealClock{},
+		clock:               simclock.DeterministicClock{},
 	}
 }
 

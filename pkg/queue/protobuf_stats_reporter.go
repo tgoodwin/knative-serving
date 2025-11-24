@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	"github.com/tgoodwin/kamera/pkg/simclock"
 
 	netheader "knative.dev/networking/pkg/http/header"
 	netstats "knative.dev/networking/pkg/http/stats"
@@ -46,7 +47,7 @@ type ProtobufStatsReporter struct {
 // NewProtobufStatsReporter creates a reporter that collects and reports queue metrics.
 func NewProtobufStatsReporter(pod string, reportingPeriod time.Duration) *ProtobufStatsReporter {
 	r := &ProtobufStatsReporter{
-		startTime: time.Now(),
+		startTime: simclock.Now(),
 		podName:   pod,
 
 		reportingPeriodSeconds: reportingPeriod.Seconds(),

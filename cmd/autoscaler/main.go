@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
@@ -208,7 +209,7 @@ func main() {
 		for sm := range statsCh {
 			// Set the timestamp when first receiving the stat.
 			if sm.Stat.Timestamp == 0 {
-				sm.Stat.Timestamp = time.Now().Unix()
+				sm.Stat.Timestamp = simclock.Now().Unix()
 			}
 			f.Process(sm)
 		}

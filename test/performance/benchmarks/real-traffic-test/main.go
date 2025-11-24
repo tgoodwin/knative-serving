@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	vegeta "github.com/tsenart/vegeta/v12/lib"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
@@ -213,7 +214,7 @@ func createServices(clients *test.Clients, count int) ([]*serviceConfig, func(),
 	}
 
 	objs := make([]*serviceConfig, count)
-	begin := time.Now()
+	begin := simclock.Now()
 	commonSos := []ktest.ServiceOption{
 		ktest.WithResourceRequirements(corev1.ResourceRequirements{
 			// We set a small resource alloc so that we can pack more pods into the cluster,

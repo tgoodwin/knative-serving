@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	vegeta "github.com/tsenart/vegeta/v12/lib"
 	v1 "k8s.io/api/apps/v1"
 	netapi "knative.dev/networking/pkg/apis/networking"
@@ -192,7 +193,7 @@ func createServices(clients *test.Clients, count int) ([]*v1test.ResourceObjects
 	}
 
 	objs := make([]*v1test.ResourceObjects, count)
-	begin := time.Now()
+	begin := simclock.Now()
 	sos := []ktest.ServiceOption{
 		// We set a small resource alloc so that we can pack more pods into the cluster.
 		ktest.WithResourceRequirements(corev1.ResourceRequirements{
@@ -320,7 +321,7 @@ func runScaleFromZero(ctx context.Context, clients *test.Clients, idx int, ro *v
 		serviceReadyChan <- struct{}{}
 	}()
 
-	start := time.Now()
+	start := simclock.Now()
 	// Get the duration that takes to change deployment spec.
 	var dd time.Duration
 	for {

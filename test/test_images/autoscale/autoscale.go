@@ -26,10 +26,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"knative.dev/serving/test"
 )
 
-var mathrand = rand.New(rand.NewSource(time.Now().UnixNano()))
+var mathrand = rand.New(rand.NewSource(simclock.Now().UnixNano()))
 
 // Algorithm from https://stackoverflow.com/a/21854246
 
@@ -96,13 +97,13 @@ func prime(max int) string {
 }
 
 func sleep(d time.Duration) string {
-	start := time.Now()
+	start := simclock.Now()
 	time.Sleep(d)
 	return fmt.Sprintf("Slept for %v.\n", time.Since(start))
 }
 
 func randSleep(randSleepTimeMean time.Duration, randSleepTimeStdDev int) string {
-	start := time.Now()
+	start := simclock.Now()
 	randRes := time.Duration(mathrand.NormFloat64()*float64(randSleepTimeStdDev))*time.Millisecond + randSleepTimeMean
 	time.Sleep(randRes)
 	return fmt.Sprintf("Randomly slept for %v.\n", time.Since(start))

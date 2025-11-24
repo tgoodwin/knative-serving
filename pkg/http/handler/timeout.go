@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"k8s.io/utils/clock"
 	"knative.dev/pkg/websocket"
 )
@@ -60,7 +61,7 @@ func NewTimeoutHandler(h http.Handler, msg string, timeoutFunc TimeoutFunc) http
 		handler:     h,
 		body:        msg,
 		timeoutFunc: timeoutFunc,
-		clock:       clock.RealClock{},
+		clock:       simclock.DeterministicClock{},
 	}
 }
 

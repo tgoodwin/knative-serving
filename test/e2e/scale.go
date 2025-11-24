@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -125,7 +126,7 @@ func ScaleToWithin(t *testing.T, scale int, duration time.Duration, latencies La
 				}()
 
 				// Start the clock for various waypoints towards Service readiness.
-				start := time.Now()
+				start := simclock.Now()
 				// Record the overall completion time regardless of success/failure.
 				defer latencies.Add("time-to-done", start)
 

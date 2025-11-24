@@ -18,14 +18,14 @@ package handlers
 
 import (
 	"net/http"
-	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"knative.dev/serving/test/types"
 )
 
 func requestInfo(r *http.Request) *types.RequestInfo {
 	return &types.RequestInfo{
-		Timestamp:  time.Now(),
+		Timestamp:  simclock.Now(),
 		URI:        r.RequestURI,
 		Host:       r.Host,
 		Method:     r.Method,

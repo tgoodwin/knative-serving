@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -215,7 +216,7 @@ func Main(opts ...Option) error {
 	reportTicker := time.NewTicker(reportingPeriod)
 	defer reportTicker.Stop()
 
-	stats := netstats.NewRequestStats(time.Now())
+	stats := netstats.NewRequestStats(simclock.Now())
 	go func() {
 		for now := range reportTicker.C {
 			stat := stats.Report(now)

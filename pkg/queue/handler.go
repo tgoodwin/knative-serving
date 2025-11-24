@@ -20,8 +20,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.opentelemetry.io/otel/trace"
 	netheader "knative.dev/networking/pkg/http/header"
 	netstats "knative.dev/networking/pkg/http/stats"
@@ -51,9 +51,9 @@ func ProxyHandler(
 		if activator.Name == netheader.GetKnativeProxyValue(r) {
 			in, out = netstats.ProxiedIn, netstats.ProxiedOut
 		}
-		stats.HandleEvent(netstats.ReqEvent{Time: time.Now(), Type: in})
+		stats.HandleEvent(netstats.ReqEvent{Time: simclock.Now(), Type: in})
 		defer func() {
-			stats.HandleEvent(netstats.ReqEvent{Time: time.Now(), Type: out})
+			stats.HandleEvent(netstats.ReqEvent{Time: simclock.Now(), Type: out})
 		}()
 
 		netheader.RewriteHostOut(r)

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -333,7 +334,7 @@ func (m *MultiScaler) createScaler(decider *Decider, key types.NamespacedName) (
 }
 
 func (m *MultiScaler) tickScaler(scaler UniScaler, runner *scalerRunner, metricKey types.NamespacedName) {
-	sr := scaler.Scale(runner.logger, time.Now())
+	sr := scaler.Scale(runner.logger, simclock.Now())
 
 	if !sr.ScaleValid {
 		return

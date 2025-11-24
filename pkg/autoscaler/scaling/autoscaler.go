@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
@@ -106,7 +107,7 @@ func newAutoscaler(
 	}
 	var pt time.Time
 	if curC > 1 {
-		pt = time.Now()
+		pt = simclock.Now()
 		// A new instance of autoscaler is created in panic mode.
 		metrics.SetPanic(true)
 	} else {

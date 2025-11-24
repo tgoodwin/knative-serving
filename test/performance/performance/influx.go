@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	vegeta "github.com/tsenart/vegeta/v12/lib"
 )
 
@@ -91,8 +91,7 @@ func (ir *InfluxReporter) FlushAndShutdown() {
 func (ir *InfluxReporter) AddDataPoint(measurement string, fields map[string]interface{}) {
 	p := influxdb2.NewPoint(measurement,
 		ir.tags,
-		fields,
-		time.Now())
+		fields, simclock.Now())
 
 	// Write point asynchronously
 	ir.writeAPI.WritePoint(p)

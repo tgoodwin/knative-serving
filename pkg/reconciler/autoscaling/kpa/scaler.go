@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"knative.dev/pkg/apis/duck"
 	"knative.dev/pkg/injection/clients/dynamicclient"
 	"knative.dev/pkg/logging"
@@ -200,7 +201,7 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *autoscalingv1alpha1
 		activationTimeout = cfgD.ProgressDeadline + activationTimeoutBuffer
 	}
 
-	now := time.Now()
+	now := simclock.Now()
 	logger := logging.FromContext(ctx)
 	switch {
 	case pa.Status.IsActivating(): // Active=Unknown

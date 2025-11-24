@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"k8s.io/utils/clock"
@@ -54,7 +55,7 @@ func NewAppRequestMetricsHandler(
 		handler = &appRequestMetricsHandler{
 			next:    next,
 			breaker: b,
-			clock:   clock.RealClock{},
+			clock:   simclock.DeterministicClock{},
 		}
 	)
 

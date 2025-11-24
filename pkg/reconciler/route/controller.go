@@ -19,6 +19,7 @@ package route
 import (
 	"context"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	netclient "knative.dev/networking/pkg/client/injection/client"
 	certificateinformer "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/certificate"
 	ingressinformer "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/ingress"
@@ -47,7 +48,7 @@ func NewController(
 	ctx context.Context,
 	cmw configmap.Watcher,
 ) *controller.Impl {
-	return newController(ctx, cmw, clock.RealClock{})
+	return newController(ctx, cmw, simclock.DeterministicClock{})
 }
 
 type reconcilerOption func(*Reconciler)
