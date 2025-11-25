@@ -3,17 +3,25 @@
 `hack` is a collection of scripts used to bootstrap CI processes and other vital
 entrypoint functionality.
 
+## Contributing
+
+If you are interested in contributing to Knative, take a look at [CLOTRIBUTOR](https://clotributor.dev/search?project=knative&page=1)
+for a list of help wanted issues across the project.
+
 ## Using the `presubmit-tests.sh` helper script
 
 This is a helper script to run the presubmit tests. To use it:
 
-1. Source this script.
+1. Source this script:
+   ```bash
+   source "$(go run knative.dev/hack/cmd/script presubmit-tests.sh)"
+   ```
 
 1. [optional] Define the function `build_tests()`. If you don't define this
    function, the default action for running the build tests is to:
 
    - run `go build` on the entire repo
-   - run `/hack/verify-codegen.sh` (if it exists)
+   - run `hack/verify-codegen.sh` (if it exists)
    - check licenses in all go packages
 
 1. [optional] Customize the default build test runner, if you're using it. Set
@@ -70,7 +78,7 @@ skipped.
 ### Sample presubmit test script
 
 ```bash
-source vendor/knative.dev/hack/presubmit-tests.sh
+source "$(go run knative.dev/hack/cmd/script presubmit-tests.sh)"
 
 function post_build_tests() {
   echo "Cleaning up after build tests"
@@ -99,7 +107,10 @@ This is a helper script for Knative E2E test scripts. To use it:
    [here](https://github.com/knative/toolbox/blob/main/kntest/pkg/kubetest2/gke/README.md) to the `initialize` function
    call if the default values don't fit your needs.
 
-1. Source the script.
+1. Source the script:
+    ```bash
+    source "$(go run knative.dev/hack/cmd/script e2e-tests.sh)"
+    ```
 
 1. [optional] Write the `knative_setup()` function, which will set up your
    system under test (e.g., Knative Serving).
@@ -166,8 +177,7 @@ for Knative Serving to be up before running the tests. It also requires that the
 test cluster is created in a specific region, `us-west2`.
 
 ```bash
-
-source vendor/knative.dev/hack/e2e-tests.sh
+source "$(go run knative.dev/hack/cmd/script e2e-tests.sh)"
 
 function knative_setup() {
   start_latest_knative_serving
@@ -201,7 +211,10 @@ This is a helper script for Knative performance test scripts. In combination
 with specific Prow jobs, it can automatically manage the environment for running
 benchmarking jobs for each repo. To use it:
 
-1. Source the script.
+1. Source the script:
+   ```bash
+   source "$(go run knative.dev/hack/cmd/script performance-tests.sh)"
+   ```
 
 1. [optional] Customize GCP project settings for the benchmarks. Set the
    following environment variables if the default value doesn't fit your needs:
@@ -238,7 +251,7 @@ benchmarking jobs for each repo. To use it:
 This script will update `Knative serving` and the given benchmark.
 
 ```bash
-source vendor/knative.dev/hack/performance-tests.sh
+source "$(go run knative.dev/hack/cmd/script performance-tests.sh)"
 
 function update_knative() {
   echo ">> Updating serving"
@@ -257,7 +270,10 @@ main $@
 
 This is a helper script for Knative release scripts. To use it:
 
-1. Source the script.
+1. Source the script:
+    ```bash
+    source "$(go run knative.dev/hack/cmd/script release.sh)"
+    ```
 
 1. [optional] By default, the release script will run
    `./test/presubmit-tests.sh` as the release validation tests. If you need to
@@ -313,7 +329,7 @@ This is a helper script for Knative release scripts. To use it:
 ### Sample release script
 
 ```bash
-source vendor/knative.dev/hack/release.sh
+source "$(go run knative.dev/hack/cmd/script release.sh)"
 
 function build_release() {
   # config/ contains the manifests

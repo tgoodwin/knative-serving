@@ -22,7 +22,7 @@ metadata:
   labels:
     app.kubernetes.io/component: net-gateway-api
     app.kubernetes.io/name: knative-serving
-    app.kubernetes.io/version: "20230818-8d4ed817"
+    app.kubernetes.io/version: "20250909-37712427"
     experimental.istio.io/disable-gateway-port-translation: "true"
 spec:
   type: ClusterIP
@@ -49,7 +49,7 @@ spec:
 # limitations under the License.
 
 kind: Gateway
-apiVersion: gateway.networking.k8s.io/v1alpha2
+apiVersion: gateway.networking.k8s.io/v1
 metadata:
   name: knative-local-gateway
   namespace: istio-system
@@ -82,7 +82,7 @@ spec:
 # limitations under the License.
 
 kind: Gateway
-apiVersion: gateway.networking.k8s.io/v1beta1
+apiVersion: gateway.networking.k8s.io/v1
 metadata:
   name: knative-gateway
   namespace: istio-system
@@ -95,6 +95,17 @@ spec:
     - name: default
       port: 80
       protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+    # We've observed when adding and removing a listener on port 443 this
+    # causes the GKE LB to have downtime. By adding this tls listener
+    # we keep that LB port open.
+    - name: tls
+      port: 443
+      protocol: TLS
+      tls:
+        mode: Passthrough
       allowedRoutes:
         namespaces:
           from: All

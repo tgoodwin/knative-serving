@@ -143,14 +143,14 @@ type Manager struct {
 
 	// mu guards keys.
 	mu   sync.Mutex
-	keys sets.String
+	keys sets.Set[string]
 }
 
 // New creates a new Manager, that will invoke the given callback when
 // async probing is finished.
 func New(cb Done, transport http.RoundTripper) *Manager {
 	return &Manager{
-		keys:      sets.NewString(),
+		keys:      sets.New[string](),
 		cb:        cb,
 		transport: transport,
 	}
@@ -186,7 +186,7 @@ func (m *Manager) doAsync(ctx context.Context, target string, arg interface{}, p
 			result bool
 			inErr  error
 		)
-		err := wait.PollImmediate(period, timeout, func() (bool, error) {
+		err := wait.PollUntilContextTimeout(ctx, period, timeout, true, func(ctx context.Context) (bool, error) {
 			result, inErr = Do(ctx, m.transport, target, ops...)
 			// Do not return error, which is from verifierError, as retry is expected until timeout.
 			return result, nil

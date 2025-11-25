@@ -2,94 +2,64 @@
 # Do not modify this file, instead modify peribolos/knative.yaml
 
 aliases:
-  client-reviewers:
-  - itsmurugappan
+  client-reviewers: []
   client-wg-leads:
   - dsimansk
-  - navidshaikh
-  - rhuss
   client-writers:
   - dsimansk
-  - maximilien
-  - navidshaikh
-  - rhuss
-  - vyasgun
-  conformance-task-force-leads:
-  - salaboy
-  conformance-writers:
-  - salaboy
   docs-reviewers:
   - nainaz
-  - nak3
-  - pmbanugo
-  - retocode
   - skonto
-  - snneji
-  docs-wg-leads:
-  - snneji
   docs-writers:
-  - csantanapr
-  - nak3
-  - psschwei
-  - retocode
   - skonto
-  - snneji
   eventing-reviewers:
+  - Leo6Leo
   - aslom
+  - cali0707
   - creydr
-  eventing-triage:
-  - lberk
   eventing-wg-leads:
+  - creydr
   - pierDipi
   eventing-writers:
+  - Leo6Leo
   - aliok
+  - cali0707
   - creydr
-  - lberk
-  - lionelvillard
   - matzew
-  - odacremolbap
   - pierDipi
   func-reviewers:
-  - gauron99
   - jrangelramos
   - nainaz
   func-writers:
+  - gauron99
   - jrangelramos
-  - lance
   - lkingland
   - matejvasek
+  - matzew
   - salaboy
   functions-wg-leads:
   - lkingland
   - salaboy
   knative-admin:
-  - Vishal-Chdhry
-  - creydr
-  - csantanapr
+  - aliok
+  - arsenetar
+  - cardil
   - dprotaso
   - dsimansk
+  - evankanderson
+  - gauron99
   - knative-automation
   - knative-prow-releaser-robot
   - knative-prow-robot
   - knative-prow-updater-robot
   - knative-test-reporter-robot
-  - kvmware
-  - lance
-  - mchmarny
-  - nainaz
-  - pierDipi
-  - psschwei
-  - puerco
-  - salaboy
+  - matzew
   - skonto
-  - smoser-ibm
   - upodroid
-  - xtreme-sameer-vohra
   knative-release-leads:
-  - Vishal-Chdhry
-  - creydr
+  - dprotaso
   - dsimansk
-  - pierDipi
+  - gauron99
   - skonto
   knative-robots:
   - knative-automation
@@ -101,27 +71,23 @@ aliases:
   - aliok
   - houshengbo
   - matzew
-  - maximilien
   operations-wg-leads:
   - houshengbo
   operations-writers:
   - aliok
   - houshengbo
   - matzew
-  - maximilien
   productivity-leads:
-  - kvmware
+  - cardil
   - upodroid
   productivity-reviewers:
   - evankanderson
   - mgencur
   productivity-wg-leads:
-  - kvmware
+  - cardil
   - upodroid
   productivity-writers:
   - cardil
-  - kvmware
-  - psschwei
   - upodroid
   security-wg-leads:
   - davidhadas
@@ -130,44 +96,31 @@ aliases:
   - davidhadas
   - evankanderson
   serving-approvers:
-  - nak3
-  - psschwei
+  - dsimansk
   - skonto
   serving-reviewers:
-  - KauzClay
-  - jsanin-vmw
-  - kauana
-  - kvmware
-  - retocode
   - skonto
-  - xtreme-vikram-yadav
   serving-triage:
-  - KauzClay
-  - retocode
   - skonto
   serving-wg-leads:
   - dprotaso
   serving-writers:
   - dprotaso
-  - nak3
-  - psschwei
+  - dsimansk
   - skonto
   steering-committee:
-  - csantanapr
-  - lance
-  - nainaz
-  - puerco
-  - salaboy
-  technical-oversight-committee:
+  - aliok
+  - arsenetar
   - dprotaso
-  - dsimansk
-  - kvmware
-  - psschwei
-  trademark-committee:
-  - mchmarny
-  - smoser-ibm
-  - xtreme-sameer-vohra
+  - evankanderson
+  - matzew
   ux-wg-leads:
-  - snneji
+  - Leo6Leo
+  - cali0707
+  - mmejia02
+  - zainabhusain227
   ux-writers:
-  - snneji
+  - Leo6Leo
+  - cali0707
+  - mmejia02
+  - zainabhusain227

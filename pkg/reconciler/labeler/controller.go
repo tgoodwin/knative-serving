@@ -19,8 +19,8 @@ package labeler
 import (
 	"context"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/clock"
 
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	servingclient "knative.dev/serving/pkg/client/injection/client"
@@ -80,7 +80,7 @@ func NewController(
 	))
 
 	client := servingclient.Get(ctx)
-	clock := &clock.RealClock{}
+	clock := &simclock.DeterministicClock{}
 	c.caccV2 = newConfigurationAccessor(client, impl.Tracker, configInformer.Lister(), configInformer.Informer().GetIndexer(), clock)
 	c.raccV2 = newRevisionAccessor(client, impl.Tracker, revisionInformer.Lister(), revisionInformer.Informer().GetIndexer(), clock)
 

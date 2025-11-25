@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	netheader "knative.dev/networking/pkg/http/header"
 	"knative.dev/pkg/kmeta"
 	"knative.dev/pkg/ptr"
 	"knative.dev/serving/pkg/apis/autoscaling"
@@ -40,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	apiconfig "knative.dev/serving/pkg/apis/config"
+	deploymentconfig "knative.dev/serving/pkg/deployment"
 )
 
 const certVolumeName = "server-certs"
@@ -58,7 +58,6 @@ var (
 		SubPathExpr: "$(K_INTERNAL_POD_NAMESPACE)_$(K_INTERNAL_POD_NAME)_",
 	}
 
-	//nolint:gosec // Volume, not hardcoded credentials
 	varTokenVolume = corev1.Volume{
 		Name: "knative-token-volume",
 		VolumeSource: corev1.VolumeSource{
@@ -74,7 +73,6 @@ var (
 		ReadOnly:  true,
 	}
 
-	//nolint:gosec // VolumeMount, not hardcoded credentials
 	varTokenVolumeMount = corev1.VolumeMount{
 		Name:      varTokenVolume.Name,
 		MountPath: queue.TokenDirectory,
@@ -139,22 +137,31 @@ func certVolume(secret string) corev1.Volume {
 	}
 }
 
-func rewriteUserProbe(p *corev1.Probe, userPort int) {
+func rewriteUserLivenessProbe(p *corev1.Probe, userPort int) {
 	if p == nil {
 		return
 	}
 	switch {
 	case p.HTTPGet != nil:
 		p.HTTPGet.Port = intstr.FromInt(userPort)
-		// With mTLS enabled, Istio rewrites probes, but doesn't spoof the kubelet
-		// user agent, so we need to inject an extra header to be able to distinguish
-		// between probes and real requests.
-		p.HTTPGet.HTTPHeaders = append(p.HTTPGet.HTTPHeaders, corev1.HTTPHeader{
-			Name:  netheader.KubeletProbeKey,
-			Value: queue.Name,
-		})
 	case p.TCPSocket != nil:
 		p.TCPSocket.Port = intstr.FromInt(userPort)
+	}
+}
+
+func makePreferSpreadRevisionOverNodes(revisionLabelValue string) *corev1.PodAntiAffinity {
+	return &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+			Weight: 100,
+			PodAffinityTerm: corev1.PodAffinityTerm{
+				TopologyKey: corev1.LabelHostname,
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						serving.RevisionLabelKey: revisionLabelValue,
+					},
+				},
+			},
+		}},
 	}
 }
 
@@ -193,7 +200,7 @@ func makePodSpec(rev *v1.Revision, cfg *config.Config) (*corev1.PodSpec, error) 
 		extraVolumes = append(extraVolumes, *tokenVolume)
 	}
 
-	if cfg.Network.InternalEncryption {
+	if cfg.Network.SystemInternalTLSEnabled() {
 		queueContainer.VolumeMounts = append(queueContainer.VolumeMounts, varCertVolumeMount)
 		extraVolumes = append(extraVolumes, certVolume(networking.ServingCertName))
 	}
@@ -201,6 +208,9 @@ func makePodSpec(rev *v1.Revision, cfg *config.Config) (*corev1.PodSpec, error) 
 	podSpec := BuildPodSpec(rev, append(BuildUserContainers(rev), *queueContainer), cfg)
 	podSpec.Volumes = append(podSpec.Volumes, extraVolumes...)
 
+	if val := cfg.Deployment.PodRuntimeClassName(rev.ObjectMeta.Labels); podSpec.RuntimeClassName == nil {
+		podSpec.RuntimeClassName = val
+	}
 	if cfg.Observability.EnableVarLogCollection {
 		podSpec.Volumes = append(podSpec.Volumes, varLogVolume)
 
@@ -216,6 +226,10 @@ func makePodSpec(rev *v1.Revision, cfg *config.Config) (*corev1.PodSpec, error) 
 
 			podSpec.Containers[i] = container
 		}
+	}
+
+	if cfg.Deployment.DefaultAffinityType == deploymentconfig.PreferSpreadRevisionOverNodes && rev.Spec.Affinity == nil {
+		podSpec.Affinity = &corev1.Affinity{PodAntiAffinity: makePreferSpreadRevisionOverNodes(rev.Name)}
 	}
 
 	return podSpec, nil
@@ -256,6 +270,15 @@ func makeContainer(container corev1.Container, rev *v1.Revision) corev1.Containe
 	if container.TerminationMessagePolicy == "" {
 		container.TerminationMessagePolicy = corev1.TerminationMessageFallbackToLogsOnError
 	}
+
+	if container.ReadinessProbe != nil {
+		if container.ReadinessProbe.HTTPGet != nil || container.ReadinessProbe.TCPSocket != nil || container.ReadinessProbe.GRPC != nil {
+			// HTTP, TCP and gRPC ReadinessProbes are executed by the queue-proxy directly against the
+			// container instead of via kubelet.
+			container.ReadinessProbe = nil
+		}
+	}
+
 	return container
 }
 
@@ -266,15 +289,8 @@ func makeServingContainer(servingContainer corev1.Container, rev *v1.Revision) c
 	servingContainer.Ports = buildContainerPorts(userPort)
 	servingContainer.Env = append(servingContainer.Env, buildUserPortEnv(userPortStr))
 	container := makeContainer(servingContainer, rev)
-	if container.ReadinessProbe != nil {
-		if container.ReadinessProbe.HTTPGet != nil || container.ReadinessProbe.TCPSocket != nil {
-			// HTTP and TCP ReadinessProbes are executed by the queue-proxy directly against the
-			// user-container instead of via kubelet.
-			container.ReadinessProbe = nil
-		}
-	}
-	// If the client provides probes, we should fill in the port for them.
-	rewriteUserProbe(container.LivenessProbe, int(userPort))
+	// If the user provides a liveness probe, we should rewrite in the port on the user-container for them.
+	rewriteUserLivenessProbe(container.LivenessProbe, int(userPort))
 	return container
 }
 
@@ -357,6 +373,7 @@ func MakeDeployment(rev *v1.Revision, cfg *config.Config) (*appsv1.Deployment, e
 
 	labels := makeLabels(rev)
 	anns := makeAnnotations(rev)
+	annsPod := makeAnnotationsForPod(rev, anns)
 
 	// Slowly but steadily roll the deployment out, to have the least possible impact.
 	maxUnavailable := intstr.FromInt(0)
@@ -372,6 +389,7 @@ func MakeDeployment(rev *v1.Revision, cfg *config.Config) (*appsv1.Deployment, e
 			Replicas:                ptr.Int32(replicaCount),
 			Selector:                makeSelector(rev),
 			ProgressDeadlineSeconds: ptr.Int32(progressDeadline),
+			RevisionHistoryLimit:    ptr.Int32(0),
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -381,7 +399,7 @@ func MakeDeployment(rev *v1.Revision, cfg *config.Config) (*appsv1.Deployment, e
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      labels,
-					Annotations: anns,
+					Annotations: annsPod,
 				},
 				Spec: *podSpec,
 			},

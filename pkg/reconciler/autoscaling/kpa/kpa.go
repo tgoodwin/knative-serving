@@ -21,13 +21,11 @@ import (
 	"fmt"
 	"math"
 
-	"go.opencensus.io/stats"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 
 	nv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
-	netcfg "knative.dev/networking/pkg/config"
 	"knative.dev/pkg/logging"
-	pkgmetrics "knative.dev/pkg/metrics"
 	"knative.dev/pkg/ptr"
 	pkgreconciler "knative.dev/pkg/reconciler"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
@@ -71,6 +69,8 @@ type Reconciler struct {
 	podsLister corev1listers.PodLister
 	deciders   resources.Deciders
 	scaler     *scaler
+
+	metrics *kpaMetrics
 }
 
 // Check that our Reconciler implements the necessary interfaces.
@@ -102,7 +102,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 			return fmt.Errorf("error reconciling SKS: %w", err)
 		}
 		pa.Status.MarkSKSNotReady(noPrivateServiceName) // In both cases this is true.
-		computeStatus(ctx, pa, podCounts{want: scaleUnknown}, logger)
+		computeStatus(ctx, pa, podCounts{want: scaleUnknown}, logger, c.metrics)
 		return nil
 	}
 
@@ -129,7 +129,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	// When activator CA is enabled, force activator always in path.
 	// TODO: This is a temporary state and to be fixed.
 	// See also issues/11906 and issues/12797.
-	case config.FromContext(ctx).Network.DataplaneTrust != netcfg.TrustDisabled:
+	case config.FromContext(ctx).Network.SystemInternalTLSEnabled():
 		mode = nv1alpha1.SKSOperationModeProxy
 
 	// If the want == -1 and PA is inactive that implies the autoscaler
@@ -186,7 +186,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		terminating: terminating,
 	}
 	logger.Infof("Observed pod counts=%#v", pc)
-	computeStatus(ctx, pa, pc, logger)
+	computeStatus(ctx, pa, pc, logger, c.metrics)
 	return nil
 }
 
@@ -219,29 +219,36 @@ func (c *Reconciler) reconcileDecider(ctx context.Context, pa *autoscalingv1alph
 	return decider, nil
 }
 
-func computeStatus(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler, pc podCounts, logger *zap.SugaredLogger) {
-	pa.Status.DesiredScale, pa.Status.ActualScale = ptr.Int32(int32(pc.want)), ptr.Int32(int32(pc.ready))
+func computeStatus(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler, pc podCounts, logger *zap.SugaredLogger, m *kpaMetrics) {
+	//nolint:gosec // bound by 0 < x < max(int32)
+	pa.Status.ActualScale = ptr.Int32(int32(pc.ready))
 
-	reportMetrics(pa, pc)
+	// When the autoscaler just restarted, it does not yet have metrics and would change the desiredScale to -1 and moments
+	// later back to the correct value. The following condition omits this.
+	if pc.want == -1 && pa.Status.DesiredScale != nil && *pa.Status.DesiredScale >= 0 {
+		logger.Debugf("Ignoring change of desiredScale from %d to %d", *pa.Status.DesiredScale, pc.want)
+	} else {
+		//nolint:gosec // bound by 0 < x < max(int32)
+		pa.Status.DesiredScale = ptr.Int32(int32(pc.want))
+	}
+
+	reportMetrics(m, pa, pc)
 	computeActiveCondition(ctx, pa, pc)
 	logger.Debugf("PA Status after reconcile: %#v", pa.Status.Status)
 }
 
-func reportMetrics(pa *autoscalingv1alpha1.PodAutoscaler, pc podCounts) {
+func reportMetrics(m *kpaMetrics, pa *autoscalingv1alpha1.PodAutoscaler, pc podCounts) {
 	serviceLabel := pa.Labels[serving.ServiceLabelKey] // This might be empty.
 	configLabel := pa.Labels[serving.ConfigurationLabelKey]
 
-	ctx := metrics.RevisionContext(pa.Namespace, serviceLabel, configLabel, pa.Name)
+	attrs := attribute.NewSet(
+		metrics.K8sNamespaceKey.With(pa.Namespace),
+		metrics.RevisionNameKey.With(pa.Name),
+		metrics.ServiceNameKey.With(serviceLabel),
+		metrics.ConfigurationNameKey.With(configLabel),
+	)
 
-	stats := []stats.Measurement{
-		actualPodCountM.M(int64(pc.ready)), notReadyPodCountM.M(int64(pc.notReady)),
-		pendingPodCountM.M(int64(pc.pending)), terminatingPodCountM.M(int64(pc.terminating)),
-	}
-	// Negative "want" values represent an empty metrics pipeline and thus no specific request is being made.
-	if pc.want >= 0 {
-		stats = append(stats, requestedPodCountM.M(int64(pc.want)))
-	}
-	pkgmetrics.RecordBatch(ctx, stats...)
+	m.Record(attrs, pc)
 }
 
 // computeActiveCondition updates the status of a PA given the current scale (got), desired scale (want)

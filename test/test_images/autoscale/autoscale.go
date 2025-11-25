@@ -26,17 +26,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"knative.dev/serving/test"
 )
 
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
+var mathrand = rand.New(rand.NewSource(simclock.Now().UnixNano()))
 
 // Algorithm from https://stackoverflow.com/a/21854246
 
 // Only primes less than or equal to N will be generated
-func primes(N int) []int {
+func primes(N int) []int { //nolint
 	var x, y, n int
 	nsqrt := math.Sqrt(float64(N))
 
@@ -71,7 +70,7 @@ func primes(N int) []int {
 	isPrime[3] = true
 
 	primes := make([]int, 0, 1270606)
-	for x = 0; x < len(isPrime)-1; x++ {
+	for range len(isPrime) - 1 {
 		if isPrime[x] {
 			primes = append(primes, x)
 		}
@@ -98,14 +97,14 @@ func prime(max int) string {
 }
 
 func sleep(d time.Duration) string {
-	start := time.Now()
+	start := simclock.Now()
 	time.Sleep(d)
 	return fmt.Sprintf("Slept for %v.\n", time.Since(start))
 }
 
 func randSleep(randSleepTimeMean time.Duration, randSleepTimeStdDev int) string {
-	start := time.Now()
-	randRes := time.Duration(rand.NormFloat64()*float64(randSleepTimeStdDev))*time.Millisecond + randSleepTimeMean
+	start := simclock.Now()
+	randRes := time.Duration(mathrand.NormFloat64()*float64(randSleepTimeStdDev))*time.Millisecond + randSleepTimeMean
 	time.Sleep(randRes)
 	return fmt.Sprintf("Randomly slept for %v.\n", time.Since(start))
 }

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel/sdk/metric"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,27 +43,25 @@ import (
 	. "knative.dev/pkg/reconciler/testing"
 )
 
-var (
-	testStats = []Stat{{
-		PodName:                          "pod-1",
-		AverageConcurrentRequests:        3.0,
-		AverageProxiedConcurrentRequests: 2.0,
-		RequestCount:                     5,
-		ProxiedRequestCount:              4,
-	}, {
-		PodName:                          "pod-2",
-		AverageConcurrentRequests:        5.0,
-		AverageProxiedConcurrentRequests: 4.0,
-		RequestCount:                     7,
-		ProxiedRequestCount:              6,
-	}, {
-		PodName:                          "pod-3",
-		AverageConcurrentRequests:        3.0,
-		AverageProxiedConcurrentRequests: 2.0,
-		RequestCount:                     5,
-		ProxiedRequestCount:              4,
-	}}
-)
+var testStats = []Stat{{
+	PodName:                          "pod-1",
+	AverageConcurrentRequests:        3.0,
+	AverageProxiedConcurrentRequests: 2.0,
+	RequestCount:                     5,
+	ProxiedRequestCount:              4,
+}, {
+	PodName:                          "pod-2",
+	AverageConcurrentRequests:        5.0,
+	AverageProxiedConcurrentRequests: 4.0,
+	RequestCount:                     7,
+	ProxiedRequestCount:              6,
+}, {
+	PodName:                          "pod-3",
+	AverageConcurrentRequests:        3.0,
+	AverageProxiedConcurrentRequests: 2.0,
+	RequestCount:                     5,
+	ProxiedRequestCount:              4,
+}}
 
 const (
 	testRevision  = "just-a-test-revision"
@@ -79,7 +78,7 @@ func testStatsWithTime(n int, youngestSecs float64) []Stat {
 		RequestCount:                     2,
 		ProxiedRequestCount:              4,
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := tmpl
 		s.PodName = "pod-" + strconv.Itoa(i)
 		s.AverageConcurrentRequests = float64((i + 1) * 2)
@@ -91,13 +90,16 @@ func testStatsWithTime(n int, youngestSecs float64) []Stat {
 }
 
 func TestNewServiceScraperWithClientHappyCase(t *testing.T) {
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
+
 	metric := testMetric()
 	ctx, cancel, _ := SetupFakeContextWithCancel(t)
 	t.Cleanup(cancel)
 	accessor := resources.NewPodAccessor(
 		fakepodsinformer.Get(ctx).Lister(),
 		testNamespace, testRevision)
-	sc := NewStatsScraper(metric, testRevision, accessor, false, netcfg.MeshCompatibilityModeAuto, logtesting.TestLogger(t))
+	sc := NewStatsScraper(metric, testRevision, accessor, false, netcfg.MeshCompatibilityModeAuto, logtesting.TestLogger(t), mp)
 	if svcS, want := sc.(*serviceScraper), urlFromTarget(testRevision+"-zhudex", testNamespace); svcS.url != want {
 		t.Errorf("scraper.url = %s, want: %s", svcS.url, want)
 	}
@@ -537,8 +539,10 @@ func TestScrapeReportErrorIfAnyFails(t *testing.T) {
 	makePods(ctx, "pods-", 2, metav1.Now())
 
 	// 1 success and 10 failures so one scrape fails permanently through retries.
-	client := newTestScrapeClient(testStats, []error{nil, errTest, errTest,
-		errTest, errTest, errTest, errTest, errTest, errTest, errTest, errTest})
+	client := newTestScrapeClient(testStats, []error{
+		nil, errTest, errTest,
+		errTest, errTest, errTest, errTest, errTest, errTest, errTest, errTest,
+	})
 	scraper := serviceScraperForTest(ctx, t, netcfg.MeshCompatibilityModeAuto, client, client, false /*podsAddressable*/, false /*passthroughLb*/)
 
 	_, err = scraper.Scrape(defaultMetric.Spec.StableWindow)
@@ -639,7 +643,7 @@ func TestOldPodShuffle(t *testing.T) {
 	}
 	// Store and reset.
 	firstRun := client.urls
-	client.urls = sets.NewString()
+	client.urls = sets.New[string]()
 
 	_, err = scraper.Scrape(defaultMetric.Spec.StableWindow)
 	if err != nil {
@@ -693,7 +697,7 @@ func TestOldPodsFallback(t *testing.T) {
 	client := newTestScrapeClient(testStats, func() []error {
 		r := make([]error, numPods)
 		// This will fail all the old pods.
-		for i := 0; i < oldPods; i++ {
+		for i := range oldPods {
 			r[i] = errors.New("bad-hair-day")
 		}
 		// But succeed all the youngs.
@@ -789,13 +793,16 @@ func TestPodDirectPassthroughScrapeNoneSucceed(t *testing.T) {
 }
 
 func serviceScraperForTest(ctx context.Context, t *testing.T, meshMode netcfg.MeshCompatibilityMode, directClient, meshClient scrapeClient,
-	podsAddressable bool, usePassthroughLb bool) *serviceScraper {
+	podsAddressable bool, usePassthroughLb bool,
+) *serviceScraper {
+	reader := metric.NewManualReader()
+	mp := metric.NewMeterProvider(metric.WithReader(reader))
 	metric := testMetric()
 	accessor := resources.NewPodAccessor(
 		fakepodsinformer.Get(ctx).Lister(),
 		testNamespace, testRevision)
 	logger := logtesting.TestLogger(t)
-	ss := newServiceScraperWithClient(metric, testRevision, accessor, usePassthroughLb, meshMode, directClient, meshClient, logger)
+	ss := newServiceScraperWithClient(metric, testRevision, accessor, usePassthroughLb, meshMode, directClient, meshClient, logger, mp)
 	ss.podsAddressable = podsAddressable
 	return ss
 }
@@ -820,7 +827,7 @@ func newTestScrapeClient(stats []Stat, errs []error) *fakeScrapeClient {
 	return &fakeScrapeClient{
 		stats: stats,
 		errs:  errs,
-		urls:  sets.NewString(),
+		urls:  sets.New[string](),
 	}
 }
 
@@ -828,7 +835,7 @@ type fakeScrapeClient struct {
 	curIdx int
 	stats  []Stat
 	errs   []error
-	urls   sets.String
+	urls   sets.Set[string]
 	mutex  sync.Mutex
 }
 
@@ -850,7 +857,7 @@ func TestURLFromTarget(t *testing.T) {
 }
 
 func makePods(ctx context.Context, prefix string, n int, startTime metav1.Time) {
-	for i := 0; i < n; i++ {
+	for i := range n {
 		p := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      prefix + strconv.Itoa(i),

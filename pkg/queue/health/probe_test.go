@@ -17,17 +17,21 @@ limitations under the License.
 package health
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"go.uber.org/atomic"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	netheader "knative.dev/networking/pkg/http/header"
@@ -54,54 +58,80 @@ func TestTCPProbe(t *testing.T) {
 }
 
 func TestHTTPProbeSuccess(t *testing.T) {
-	var (
-		gotHeader        corev1.HTTPHeader
-		gotKubeletHeader bool
-	)
 	expectedHeader := corev1.HTTPHeader{
 		Name:  "Testkey",
 		Value: "Testval",
 	}
-	var gotPath string
-	const expectedPath = "/health"
-	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if v := r.Header.Get(expectedHeader.Name); v != "" {
-			gotHeader = corev1.HTTPHeader{Name: expectedHeader.Name, Value: v}
-		}
-		if v := r.Header.Get(netheader.UserAgentKey); strings.HasPrefix(v, netheader.KubeProbeUAPrefix) {
-			gotKubeletHeader = true
-		}
-		gotPath = r.URL.Path
-		w.WriteHeader(http.StatusOK)
-	})
+	examples := []struct {
+		name           string
+		setPath        string
+		expectedHeader corev1.HTTPHeader
+		expectedPath   string
+		expectedQuery  string
+	}{{
+		name:           "Path with leading slash",
+		setPath:        "/health",
+		expectedHeader: expectedHeader,
+		expectedQuery:  "foo=bar",
+		expectedPath:   "/health",
+	}, {
+		name:           "Path with no leading slash",
+		setPath:        "health",
+		expectedHeader: expectedHeader,
+		expectedQuery:  "foo=bar",
+		expectedPath:   "/health",
+	}}
 
-	action := newHTTPGetAction(t, server.URL)
-	action.Path = expectedPath
-	action.HTTPHeaders = []corev1.HTTPHeader{expectedHeader}
+	for _, e := range examples {
+		var gotPath string
+		var gotQuery string
+		var gotHeader corev1.HTTPHeader
+		var gotKubeletHeader bool
+		t.Run(e.name, func(t *testing.T) {
+			configPath := e.setPath + "?" + e.expectedQuery
+			server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if v := r.Header.Get(e.expectedHeader.Name); v != "" {
+					gotHeader = corev1.HTTPHeader{Name: e.expectedHeader.Name, Value: v}
+				}
+				if v := r.Header.Get(netheader.UserAgentKey); strings.HasPrefix(v, netheader.KubeProbeUAPrefix) {
+					gotKubeletHeader = true
+				}
+				gotPath = r.URL.Path
+				gotQuery = r.URL.RawQuery
+				w.WriteHeader(http.StatusOK)
+			})
 
-	config := HTTPProbeConfigOptions{
-		Timeout:       time.Second,
-		HTTPGetAction: action,
-		MaxProtoMajor: 1,
-	}
+			action := newHTTPGetAction(t, server.URL)
+			action.Path = configPath
+			action.HTTPHeaders = []corev1.HTTPHeader{e.expectedHeader}
+			config := HTTPProbeConfigOptions{
+				Timeout:       time.Second,
+				HTTPGetAction: action,
+				MaxProtoMajor: 1,
+			}
 
-	// Connecting to the server should work
-	if err := HTTPProbe(config); err != nil {
-		t.Error("Expected probe to succeed but it failed with", err)
-	}
-	if d := cmp.Diff(gotHeader, expectedHeader); d != "" {
-		t.Error("Expected probe headers to match; diff:\n", d)
-	}
-	if !gotKubeletHeader {
-		t.Error("Expected kubelet probe header to be added to request")
-	}
-	if !cmp.Equal(gotPath, expectedPath) {
-		t.Errorf("Path = %s, want: %s", gotPath, expectedPath)
-	}
-	// Close the server so probing fails afterwards.
-	server.Close()
-	if err := HTTPProbe(config); err == nil {
-		t.Error("Expected probe to fail but it didn't")
+			// Connecting to the server should work
+			if err := HTTPProbe(config); err != nil {
+				t.Error("Expected probe to succeed but it failed with", err)
+			}
+			if d := cmp.Diff(gotHeader, e.expectedHeader); d != "" {
+				t.Error("Expected probe headers to match; diff:\n", d)
+			}
+			if !gotKubeletHeader {
+				t.Error("Expected kubelet probe header to be added to request")
+			}
+			if !cmp.Equal(gotPath, e.expectedPath) {
+				t.Errorf("Path = %s, want: %s", gotPath, e.expectedPath)
+			}
+			if !cmp.Equal(gotQuery, e.expectedQuery) {
+				t.Errorf("Query = %s, want: %s", gotQuery, e.expectedQuery)
+			}
+			// Close the server so probing fails afterwards.
+			server.Close()
+			if err := HTTPProbe(config); err == nil {
+				t.Error("Expected probe to fail but it didn't")
+			}
+		})
 	}
 }
 
@@ -114,7 +144,7 @@ func TestHTTPProbeNoAutoHTTP2IfDisabled(t *testing.T) {
 
 	var callCount atomic.Int32
 	server := newH2cTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		count := callCount.Inc()
+		count := callCount.Add(1)
 		if count == 1 {
 			// This is the h2c handshake, we won't do anything.
 			for key, value := range h2cHeaders {
@@ -154,22 +184,23 @@ func TestHTTPProbeAutoHTTP2(t *testing.T) {
 	var callCount atomic.Int32
 
 	server := newH2cTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		count := callCount.Inc()
-		if count == 1 {
+		count := callCount.Add(1)
+		switch count {
+		case 1:
 			// This is the h2c handshake, we won't do anything.
 			for key, value := range h2cHeaders {
 				if r.Header.Get(key) != value {
 					t.Errorf("Key %v = %v was supposed to be present in the request", key, value)
 				}
 			}
-		} else if count == 2 {
+		case 2:
 			// This is the expected call. It should not have any of the h2c upgrade stuff, since the h2c test server will handle that for us.
 			for key, value := range h2cHeaders {
 				if r.Header.Get(key) == value {
 					t.Errorf("Key %v = %v was NOT supposed to be present in the request", key, value)
 				}
 			}
-		} else {
+		default:
 			t.Errorf("Handler should only have two calls, this is call %d", count)
 		}
 	})
@@ -258,6 +289,41 @@ func TestHTTPProbeResponseErrorFailure(t *testing.T) {
 	}
 }
 
+func TestGRPCProbeSuccess(t *testing.T) {
+	// use ephemeral port to prevent port conflict
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+
+	s := grpc.NewServer()
+	grpc_health_v1.RegisterHealthServer(s, &grpcHealthServer{})
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- s.Serve(lis)
+	}()
+
+	assignedPort := lis.Addr().(*net.TCPAddr).Port
+	gRPCAction := newGRPCAction(t, assignedPort)
+	config := GRPCProbeConfigOptions{
+		Timeout:    time.Second,
+		GRPCAction: gRPCAction,
+	}
+
+	if err := GRPCProbe(config); err != nil {
+		t.Error("Expected probe to succeed but it failed with", err)
+	}
+
+	// explicitly stop grpc server
+	s.Stop()
+
+	if grpcServerErr := <-errChan; grpcServerErr != nil {
+		t.Fatalf("Failed to run gRPC test server %v", grpcServerErr)
+	}
+	close(errChan)
+}
+
 func newH2cTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	h2s := &http2.Server{}
 	t.Helper()
@@ -293,4 +359,20 @@ func newHTTPGetAction(t *testing.T, serverURL string) *corev1.HTTPGetAction {
 		// We only ever use httptest.NewServer which is http.
 		Scheme: corev1.URISchemeHTTP,
 	}
+}
+
+func newGRPCAction(t *testing.T, port int) *corev1.GRPCAction {
+	t.Helper()
+
+	return &corev1.GRPCAction{
+		Port: int32(port),
+	}
+}
+
+type grpcHealthServer struct {
+	grpc_health_v1.UnimplementedHealthServer
+}
+
+func (s *grpcHealthServer) Check(_ context.Context, _ *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+	return &grpc_health_v1.HealthCheckResponse{Status: grpc_health_v1.HealthCheckResponse_SERVING}, nil
 }

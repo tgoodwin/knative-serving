@@ -51,9 +51,6 @@ func TestExtraServiceValidation(t *testing.T) {
 	om := metav1.ObjectMeta{
 		Name:      "valid",
 		Namespace: "foo",
-		Annotations: map[string]string{
-			"features.knative.dev/podspec-dryrun": "enabled",
-		},
 	}
 
 	tests := []struct {
@@ -131,7 +128,6 @@ func TestExtraServiceValidation(t *testing.T) {
 				t.Errorf("Validate got='%v', want='%v'", got.Error(), test.want)
 			}
 		})
-
 	}
 }
 
@@ -151,9 +147,6 @@ func TestConfigurationValidation(t *testing.T) {
 	om := metav1.ObjectMeta{
 		Name:      "valid",
 		Namespace: "foo",
-		Annotations: map[string]string{
-			"features.knative.dev/podspec-dryrun": "enabled",
-		},
 	}
 
 	tests := []struct {
@@ -185,9 +178,6 @@ func TestConfigurationValidation(t *testing.T) {
 				Labels: map[string]string{
 					"serving.knative.dev/service": "skip-me",
 				},
-				Annotations: map[string]string{
-					"features.knative.dev/podspec-dryrun": "enabled",
-				},
 			},
 			Spec: goodConfigSpec,
 		},
@@ -216,7 +206,6 @@ func TestConfigurationValidation(t *testing.T) {
 				t.Errorf("Validate got='%v', want='%v'", got.Error(), test.want)
 			}
 		})
-
 	}
 }
 

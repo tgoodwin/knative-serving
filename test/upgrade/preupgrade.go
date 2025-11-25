@@ -35,6 +35,7 @@ func ServingPreUpgradeTests() []pkgupgrade.Operation {
 		ServicePreUpgradeAndScaleToZeroTest(),
 		BYORevisionPreUpgradeTest(),
 		InitialScalePreUpgradeTest(),
+		DeploymentFailurePreUpgrade(),
 	}
 }
 
@@ -51,7 +52,7 @@ func servicePreUpgrade(t *testing.T) {
 
 	resources, err := v1test.CreateServiceReady(t, clients, &upgradeServiceNames,
 		rtesting.WithConfigAnnotations(map[string]string{
-			autoscaling.MinScaleAnnotationKey: "1", //make sure we don't scale to zero during the test
+			autoscaling.MinScaleAnnotationKey: "1", // make sure we don't scale to zero during the test
 		}),
 	)
 	if err != nil {
@@ -75,7 +76,7 @@ func servicePreUpgradeAndScaleToZero(t *testing.T) {
 
 	resources, err := v1test.CreateServiceReady(t, clients, &scaleToZeroServiceNames,
 		rtesting.WithConfigAnnotations(map[string]string{
-			autoscaling.WindowAnnotationKey: autoscaling.WindowMin.String(), //make sure we scale to zero quickly
+			autoscaling.WindowAnnotationKey: autoscaling.WindowMin.String(), // make sure we scale to zero quickly
 		}),
 	)
 	if err != nil {

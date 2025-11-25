@@ -33,17 +33,34 @@ func TestTimeoutWriterAllowsForAdditionalWritesBeforeTimeout(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	clock := clock.RealClock{}
 	handler := &timeoutWriter{w: recorder, clock: clock}
+
+	// Write header and some data before any timeout
 	handler.WriteHeader(http.StatusOK)
-	handler.tryTimeoutAndWriteError("error")
-	handler.tryResponseStartTimeoutAndWriteError("error")
-	handler.tryIdleTimeoutAndWriteError(clock.Now(), 10*time.Second, "error")
 	if _, err := io.WriteString(handler, "test"); err != nil {
 		t.Fatalf("handler.Write() = %v, want no error", err)
 	}
 
+	// Verify writes succeeded
 	if got, want := recorder.Code, http.StatusOK; got != want {
 		t.Errorf("recorder.Status = %d, want %d", got, want)
 	}
+	if got, want := recorder.Body.String(), "test"; got != want {
+		t.Errorf("recorder.Body = %s, want %s", got, want)
+	}
+
+	// Now verify the try methods don't write errors when response has already started
+	// tryResponseStartTimeoutAndWriteError should not write error since response already started
+	if handler.tryResponseStartTimeoutAndWriteError("error") {
+		t.Error("tryResponseStartTimeoutAndWriteError should return false when response already started")
+	}
+
+	// tryIdleTimeoutAndWriteError should not timeout immediately after a write
+	timedOut, _ := handler.tryIdleTimeoutAndWriteError(clock.Now(), 10*time.Second, "error")
+	if timedOut {
+		t.Error("tryIdleTimeoutAndWriteError should not timeout immediately after a write")
+	}
+
+	// Verify body hasn't changed
 	if got, want := recorder.Body.String(), "test"; got != want {
 		t.Errorf("recorder.Body = %s, want %s", got, want)
 	}
@@ -79,6 +96,88 @@ func TestTimeoutWriterErrorsWriteAfterTimeout(t *testing.T) {
 	}
 }
 
+func TestTryTimeoutAndWriteErrorBehavior(t *testing.T) {
+	tests := []struct {
+		name           string
+		setup          func(*timeoutWriter)
+		wantWritten    bool
+		wantStatusCode int
+		wantBody       string
+	}{
+		{
+			name: "writes error when nothing written before and not timed out",
+			setup: func(tw *timeoutWriter) {
+				// No setup needed - fresh state
+			},
+			wantWritten:    true,
+			wantStatusCode: http.StatusGatewayTimeout,
+			wantBody:       "timeout error",
+		},
+		{
+			name: "writes error when response already started but not timed out",
+			setup: func(tw *timeoutWriter) {
+				// Write something first
+				tw.WriteHeader(http.StatusOK)
+				tw.Write([]byte("partial response"))
+			},
+			wantWritten:    true,
+			wantStatusCode: http.StatusOK, // Already set
+			wantBody:       "partial responsetimeout error",
+		},
+		{
+			name: "does not write error when already timed out",
+			setup: func(tw *timeoutWriter) {
+				// Simulate a previous timeout
+				tw.timedOut = true
+			},
+			wantWritten:    false,
+			wantStatusCode: http.StatusOK, // Default
+			wantBody:       "",
+		},
+		{
+			name: "does not write error when already timed out even with prior writes",
+			setup: func(tw *timeoutWriter) {
+				// Write something first
+				tw.WriteHeader(http.StatusAccepted)
+				tw.Write([]byte("some data"))
+				// Then mark as timed out
+				tw.timedOut = true
+			},
+			wantWritten:    false,
+			wantStatusCode: http.StatusAccepted,
+			wantBody:       "some data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			tw := &timeoutWriter{w: recorder, clock: clock.RealClock{}}
+
+			tt.setup(tw)
+
+			written := tw.tryTimeoutAndWriteError("timeout error")
+
+			if written != tt.wantWritten {
+				t.Errorf("tryTimeoutAndWriteError() returned %v, want %v", written, tt.wantWritten)
+			}
+
+			if recorder.Code != tt.wantStatusCode {
+				t.Errorf("Status code = %d, want %d", recorder.Code, tt.wantStatusCode)
+			}
+
+			if recorder.Body.String() != tt.wantBody {
+				t.Errorf("Body = %q, want %q", recorder.Body.String(), tt.wantBody)
+			}
+
+			// Verify timedOut flag is set correctly
+			if tt.wantWritten && !tw.timedOut {
+				t.Error("timedOut flag should be true after writing timeout error")
+			}
+		})
+	}
+}
+
 type timeoutHandlerTestScenario struct {
 	name                 string
 	timeout              time.Duration
@@ -95,10 +194,25 @@ type timeoutHandlerTestScenario struct {
 // This has to be global as the timer cache would otherwise return timers from another clock.
 var fakeClock = clocktest.NewFakeClock(time.Time{})
 
+// clearTimerPool drains the global timer pool to ensure tests start with a clean state.
+// This is necessary because the timer pool caches timers, and when using a fake clock,
+// timers from previous tests can be in unexpected states.
+func clearTimerPool() {
+	// Drain all timers from the pool
+	for {
+		if v := timerPool.Get(); v == nil {
+			break
+		}
+	}
+}
+
 func testTimeoutScenario(t *testing.T, scenarios []timeoutHandlerTestScenario) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+			// Clear the timer pool to ensure we start with a clean state
+			clearTimerPool()
 
 			var reqMux sync.Mutex
 			writeErrors := make(chan error, 1)
@@ -207,6 +321,80 @@ func TestTimeToResponseStartTimeoutHandler(t *testing.T) {
 	testTimeoutScenario(t, scenarios)
 }
 
+func TestResponseStartTimeoutAfterResponseStarted(t *testing.T) {
+	// This test verifies that when a response starts before the responseStartTimeout
+	// but the timeout still fires, the request completes successfully without hanging.
+	// This reproduces the scenario from:
+	// https://github.com/knative/serving/issues/15352#issuecomment-2846004329
+	//
+	// The specific race condition is:
+	// 1. Handler writes first byte (response starts)
+	// 2. responseStartTimeout timer fires
+	// 3. tryResponseStartTimeoutAndWriteError returns false (no error written)
+	// 4. Without setting responseStartTimeoutDrained=true, putTimer() hangs trying
+	//    to drain the already-drained timer channel
+
+	// Use a channel to control timing precisely
+	startWriting := make(chan struct{})
+	finishWriting := make(chan struct{})
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Wait for signal to start writing
+		<-startWriting
+		w.Write([]byte("response started"))
+
+		// Wait for signal to finish
+		<-finishWriting
+		w.Write([]byte(" and finished"))
+	})
+
+	// Create timeout handler with a responseStartTimeout
+	timeoutHandler := NewTimeoutHandler(handler, "timeout",
+		StaticTimeoutFunc(30*time.Second, 50*time.Millisecond, 0))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+
+	// Track when ServeHTTP completes
+	serveHTTPComplete := make(chan struct{})
+	go func() {
+		defer close(serveHTTPComplete)
+		timeoutHandler.ServeHTTP(rr, req)
+	}()
+
+	// Let handler start writing immediately
+	close(startWriting)
+
+	// Wait a bit to ensure the response has started and the timer is running
+	time.Sleep(10 * time.Millisecond)
+
+	// Now wait for the responseStartTimeout to fire (50ms total)
+	time.Sleep(50 * time.Millisecond)
+
+	// Let the handler finish
+	close(finishWriting)
+
+	// Wait for ServeHTTP to complete
+	// Without the fix (responseStartTimeoutDrained = true), this would hang
+	// because putTimer would try to drain an already-drained timer channel
+	select {
+	case <-serveHTTPComplete:
+		// Success - ServeHTTP completed without hanging
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeHTTP did not complete within 2 seconds - likely hanging in putTimer")
+	}
+
+	// Verify the response was successful
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	expectedBody := "response started and finished"
+	if body := rr.Body.String(); body != expectedBody {
+		t.Errorf("Handler returned unexpected body: got %q want %q", body, expectedBody)
+	}
+}
+
 func TestIdleTimeoutHandler(t *testing.T) {
 	const (
 		noIdleTimeout            = 0 * time.Millisecond
@@ -214,10 +402,12 @@ func TestIdleTimeoutHandler(t *testing.T) {
 		shortIdleTimeout         = 100 * time.Millisecond
 		longIdleTimeout          = 1 * time.Minute // Super long, not supposed to hit this.
 		longResponseStartTimeout = 1 * time.Minute // Super long, not supposed to hit this.
+		longTimeout              = 1 * time.Minute // Super long, not supposed to hit this.
 	)
 
 	scenarios := []timeoutHandlerTestScenario{{
 		name:                 "all good",
+		timeout:              longTimeout,
 		responseStartTimeout: longResponseStartTimeout,
 		idleTimeout:          longIdleTimeout,
 		handler: func(*clocktest.FakeClock, *sync.Mutex, chan error) http.Handler {
@@ -229,6 +419,7 @@ func TestIdleTimeoutHandler(t *testing.T) {
 		wantBody:   "hi",
 	}, {
 		name:                 "custom timeout message",
+		timeout:              longTimeout,
 		idleTimeout:          immediateIdleTimeout,
 		responseStartTimeout: longResponseStartTimeout,
 		handler: func(c *clocktest.FakeClock, mux *sync.Mutex, writeErrors chan error) http.Handler {
@@ -246,6 +437,7 @@ func TestIdleTimeoutHandler(t *testing.T) {
 		wantWriteError: true,
 	}, {
 		name:                 "propagate panic",
+		timeout:              longTimeout,
 		idleTimeout:          longIdleTimeout,
 		responseStartTimeout: longResponseStartTimeout,
 		handler: func(*clocktest.FakeClock, *sync.Mutex, chan error) http.Handler {
@@ -258,6 +450,7 @@ func TestIdleTimeoutHandler(t *testing.T) {
 		wantPanic:  true,
 	}, {
 		name:                 "timeout before panic",
+		timeout:              longTimeout,
 		idleTimeout:          immediateIdleTimeout,
 		responseStartTimeout: longResponseStartTimeout,
 		handler: func(c *clocktest.FakeClock, mux *sync.Mutex, _ chan error) http.Handler {
@@ -274,6 +467,7 @@ func TestIdleTimeoutHandler(t *testing.T) {
 		wantPanic:      false,
 	}, {
 		name:                 "successful writes prevent timeout",
+		timeout:              longTimeout,
 		idleTimeout:          shortIdleTimeout,
 		responseStartTimeout: longResponseStartTimeout,
 		handler: func(c *clocktest.FakeClock, _ *sync.Mutex, _ chan error) http.Handler {
@@ -293,6 +487,7 @@ func TestIdleTimeoutHandler(t *testing.T) {
 		wantPanic:  false,
 	}, {
 		name:                 "can still timeout after a successful write",
+		timeout:              longTimeout,
 		idleTimeout:          shortIdleTimeout,
 		responseStartTimeout: longResponseStartTimeout,
 		handler: func(c *clocktest.FakeClock, mux *sync.Mutex, _ chan error) http.Handler {
@@ -310,6 +505,7 @@ func TestIdleTimeoutHandler(t *testing.T) {
 		wantPanic:      false,
 	}, {
 		name:                 "no idle timeout",
+		timeout:              longTimeout,
 		idleTimeout:          noIdleTimeout,
 		responseStartTimeout: longResponseStartTimeout,
 		handler: func(*clocktest.FakeClock, *sync.Mutex, chan error) http.Handler {
@@ -334,7 +530,6 @@ func TestIdleTimeoutHandler(t *testing.T) {
 
 func TestTimeoutHandler(t *testing.T) {
 	const (
-		noTimeout        = 0 * time.Millisecond
 		immediateTimeout = 1 * time.Millisecond
 		shortTimeout     = 100 * time.Millisecond
 		longTimeout      = 1 * time.Minute
@@ -399,13 +594,12 @@ func TestTimeoutHandler(t *testing.T) {
 	}}
 
 	testTimeoutScenario(t, scenarios)
-
 }
 
 func BenchmarkTimeoutHandler(b *testing.B) {
 	writes := [][]byte{[]byte("this"), []byte("is"), []byte("a"), []byte("test")}
 	baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		for _, write := range writes {
 			w.Write(write)
 		}
@@ -415,7 +609,7 @@ func BenchmarkTimeoutHandler(b *testing.B) {
 
 	b.Run("sequential", func(b *testing.B) {
 		resp := httptest.NewRecorder()
-		for j := 0; j < b.N; j++ {
+		for range b.N {
 			handler.ServeHTTP(resp, req)
 		}
 	})

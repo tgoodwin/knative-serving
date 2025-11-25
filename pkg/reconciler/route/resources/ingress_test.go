@@ -854,7 +854,7 @@ func TestMakeIngressSpecCorrectRulesWithTagBasedRouting(t *testing.T) {
 
 // One active target.
 func TestMakeIngressRuleVanilla(t *testing.T) {
-	domains := sets.NewString("a.com", "b.org")
+	domains := sets.New("a.com", "b.org")
 	targets := traffic.RevisionTargets{{
 		TrafficTarget: v1.TrafficTarget{
 			ConfigurationName: "config",
@@ -914,7 +914,7 @@ func TestMakeIngressRuleZeroPercentTarget(t *testing.T) {
 			Percent:           ptr.Int64(0),
 		},
 	}}
-	domains := sets.NewString("test.org")
+	domains := sets.New("test.org")
 	tc := &traffic.Config{
 		Targets: map[string]traffic.RevisionTargets{
 			traffic.DefaultTarget: targets,
@@ -970,7 +970,7 @@ func TestMakeIngressRuleTwoTargets(t *testing.T) {
 		},
 	}
 	ro := tc.BuildRollout()
-	domains := sets.NewString("test.org")
+	domains := sets.New("test.org")
 	rule := makeIngressRule(domains, ns, netv1alpha1.IngressVisibilityExternalIP,
 		targets, ro.RolloutsByTag("a-tag"), false /* internal encryption */)
 	expected := netv1alpha1.IngressRule{
@@ -1294,7 +1294,8 @@ func TestMakeIngressACMEChallenges(t *testing.T) {
 						"Knative-Serving-Namespace": "test-ns",
 					},
 				}},
-			}}},
+			}},
+		},
 	}, {
 		Hosts: []string{
 			"test-route.test-ns.example.com",
@@ -1324,7 +1325,8 @@ func TestMakeIngressACMEChallenges(t *testing.T) {
 						"Knative-Serving-Namespace": "test-ns",
 					},
 				}},
-			}}},
+			}},
+		},
 	}}
 
 	tc := &traffic.Config{
@@ -1340,7 +1342,6 @@ func TestMakeIngressACMEChallenges(t *testing.T) {
 	if !cmp.Equal(expected, ci.Rules) {
 		t.Error("Unexpected rules (-want, +got):", cmp.Diff(expected, ci.Rules))
 	}
-
 }
 
 func TestMakeIngressFailToGenerateDomain(t *testing.T) {
@@ -1358,7 +1359,7 @@ func TestMakeIngressFailToGenerateDomain(t *testing.T) {
 
 	// Create a context that has a bad domain template.
 	badContext := testContext()
-	config.FromContext(badContext).Domain = &config.Domain{Domains: map[string]*config.LabelSelector{"example.com": {}}}
+	config.FromContext(badContext).Domain = &config.Domain{Domains: map[string]config.DomainConfig{"example.com": {}}}
 	config.FromContext(badContext).Network = &netcfg.Config{
 		DefaultIngressClass: "test-ingress-class",
 		DomainTemplate:      "{{.UnknownField}}.{{.NonExistentField}}.{{.BadField}}",
@@ -1395,7 +1396,7 @@ func TestMakeIngressFailToGenerateTagHost(t *testing.T) {
 
 	// Create a context that has a bad domain template.
 	badContext := testContext()
-	config.FromContext(badContext).Domain = &config.Domain{Domains: map[string]*config.LabelSelector{"example.com": {}}}
+	config.FromContext(badContext).Domain = &config.Domain{Domains: map[string]config.DomainConfig{"example.com": {}}}
 	config.FromContext(badContext).Network = &netcfg.Config{
 		DefaultIngressClass: "test-ingress-class",
 		DomainTemplate:      netcfg.DefaultDomainTemplate,
@@ -1427,6 +1428,6 @@ func testContextWithHTTPOption() context.Context {
 
 func testContextWithActivatorCA() context.Context {
 	cfg := testConfig()
-	cfg.Network.DataplaneTrust = netcfg.TrustMinimal
+	cfg.Network.SystemInternalTLS = netcfg.EncryptionEnabled
 	return config.ToContext(context.Background(), cfg)
 }

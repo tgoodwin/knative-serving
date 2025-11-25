@@ -29,6 +29,7 @@ import (
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgotesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
@@ -53,7 +54,6 @@ import (
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
 	fakensinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/namespace/fake"
 
-	_ "knative.dev/pkg/metrics/testing"
 	_ "knative.dev/pkg/system/testing"
 
 	. "knative.dev/serving/pkg/reconciler/testing/v1"
@@ -76,7 +76,8 @@ var (
 )
 
 func newTestSetup(t *testing.T, configs ...*corev1.ConfigMap) (
-	context.Context, context.CancelFunc, chan *netv1alpha1.Certificate, *configmap.ManualWatcher) {
+	context.Context, context.CancelFunc, chan *netv1alpha1.Certificate, *configmap.ManualWatcher,
+) {
 	t.Helper()
 
 	ctx, ccl, ifs := SetupFakeContextWithCancel(t)
@@ -99,8 +100,8 @@ func newTestSetup(t *testing.T, configs ...*corev1.ConfigMap) (
 			Namespace: system.Namespace(),
 		},
 		Data: map[string]string{
-			"domainTemplate": defaultDomainTemplate,
-			"autoTLS":        "true",
+			"domain-template":     defaultDomainTemplate,
+			"external-domain-tls": "true",
 			// Apply to all namespaces
 			"namespace-wildcard-cert-selector": "{}",
 		},
@@ -147,14 +148,16 @@ func newTestSetup(t *testing.T, configs ...*corev1.ConfigMap) (
 func TestNewController(t *testing.T) {
 	ctx, _ := SetupFakeContext(t)
 
-	configMapWatcher := configmap.NewStaticWatcher(&corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      netcfg.ConfigMapName,
-			Namespace: system.Namespace(),
+	configMapWatcher := configmap.NewStaticWatcher(
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      netcfg.ConfigMapName,
+				Namespace: system.Namespace(),
+			},
+			Data: map[string]string{
+				"DomainTemplate": defaultDomainTemplate,
+			},
 		},
-		Data: map[string]string{
-			"DomainTemplate": defaultDomainTemplate,
-		}},
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      routecfg.DomainConfigName,
@@ -162,7 +165,8 @@ func TestNewController(t *testing.T) {
 			},
 			Data: map[string]string{
 				"svc.cluster.local": "",
-			}},
+			},
+		},
 	)
 
 	c := NewController(ctx, configMapWatcher)
@@ -231,7 +235,8 @@ func TestReconcile(t *testing.T) {
 					Key:      "excludeWildcard",
 					Operator: "NotIn",
 					Values:   []string{"yes", "true", "anything"},
-				}}}),
+				}},
+			}),
 	}, {
 		Name: "certificate not created for excluded namespace when both internal and external labels are present",
 		Key:  "foo",
@@ -246,7 +251,8 @@ func TestReconcile(t *testing.T) {
 					Key:      disableWildcardCertLabelKey,
 					Operator: "NotIn",
 					Values:   []string{"true"},
-				}}}),
+				}},
+			}),
 	}, {
 		Name:                    "certificate creation failed",
 		Key:                     "foo",
@@ -290,7 +296,8 @@ func TestReconcile(t *testing.T) {
 					Key:      disableWildcardCertLabelKey,
 					Operator: "NotIn",
 					Values:   []string{"true"},
-				}}}),
+				}},
+			}),
 	}}
 
 	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
@@ -323,7 +330,7 @@ func TestUpdateDomainTemplate(t *testing.T) {
 		},
 		Data: map[string]string{
 			"namespace-wildcard-cert-selector": "{}",
-			"autoTLS":                          "Enabled",
+			"external-domain-tls":              "Enabled",
 		},
 	}
 	ctx, cancel, certEvents, watcher := newTestSetup(t, netCfg)
@@ -346,9 +353,9 @@ func TestUpdateDomainTemplate(t *testing.T) {
 			Namespace: system.Namespace(),
 		},
 		Data: map[string]string{
-			"domainTemplate":                   "{{.Name}}-suffix.{{.Namespace}}.{{.Domain}}",
+			"domain-template":                  "{{.Name}}-suffix.{{.Namespace}}.{{.Domain}}",
 			"namespace-wildcard-cert-selector": "{}",
-			"autoTLS":                          "Enabled",
+			"external-domain-tls":              "Enabled",
 		},
 	}
 	watcher.OnChange(netCfg)
@@ -367,9 +374,9 @@ func TestUpdateDomainTemplate(t *testing.T) {
 			Namespace: system.Namespace(),
 		},
 		Data: map[string]string{
-			"domainTemplate":                   "{{.Name}}.subdomain.{{.Namespace}}.{{.Domain}}",
+			"domain-template":                  "{{.Name}}.subdomain.{{.Namespace}}.{{.Domain}}",
 			"namespace-wildcard-cert-selector": `{}`,
-			"autoTLS":                          "Enabled",
+			"external-domain-tls":              "Enabled",
 		},
 	}
 	watcher.OnChange(netCfg)
@@ -389,8 +396,8 @@ func TestUpdateDomainTemplate(t *testing.T) {
 			Namespace: system.Namespace(),
 		},
 		Data: map[string]string{
-			"domainTemplate": "{{.Namespace}}.{{.Name}}.{{.Domain}}",
-			"autoTLS":        "Enabled",
+			"domain-template":     "{{.Namespace}}.{{.Name}}.{{.Domain}}",
+			"external-domain-tls": "Enabled",
 		},
 	}
 	watcher.OnChange(netCfg)
@@ -416,7 +423,7 @@ func TestChangeDefaultDomain(t *testing.T) {
 			Namespace: system.Namespace(),
 		},
 		Data: map[string]string{
-			"autoTLS":                          "Enabled",
+			"external-domain-tls":              "Enabled",
 			"namespace-wildcard-cert-selector": "{}",
 		},
 	}
@@ -453,9 +460,17 @@ func TestChangeDefaultDomain(t *testing.T) {
 	}
 
 	// Assert we have exactly one certificate.
-	certs, _ := fakeclient.Get(ctx).NetworkingV1alpha1().Certificates(namespace.Name).List(ctx, metav1.ListOptions{})
-	if len(certs.Items) > 1 {
+	var certs *netv1alpha1.CertificateList
+	err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 5*time.Second, true, func(context.Context) (bool, error) {
+		var err error
+		certs, err = fakeclient.Get(ctx).NetworkingV1alpha1().Certificates(namespace.Name).List(ctx, metav1.ListOptions{})
+		return len(certs.Items) == 1, err
+	})
+
+	if wait.Interrupted(err) {
 		t.Errorf("Expected 1 certificate, got %d.", len(certs.Items))
+	} else if err != nil {
+		t.Errorf("Unexpected error fetching certificates %v", err)
 	}
 }
 
@@ -472,7 +487,7 @@ func TestDomainConfigDomain(t *testing.T) {
 		name:      "no domainmapping without config",
 		domainCfg: map[string]string{},
 		netCfg: map[string]string{
-			"autoTLS": "Enabled",
+			"external-domain-tls": "Enabled",
 		},
 	}, {
 		name: "default domain",
@@ -480,7 +495,7 @@ func TestDomainConfigDomain(t *testing.T) {
 			"other.com": "selector:\n app: dev",
 		},
 		netCfg: map[string]string{
-			"autoTLS":                          "Enabled",
+			"external-domain-tls":              "Enabled",
 			"namespace-wildcard-cert-selector": "{}",
 		},
 		wantCertName: "testns.svc.cluster.local",
@@ -491,7 +506,7 @@ func TestDomainConfigDomain(t *testing.T) {
 			"default.com": "",
 		},
 		netCfg: map[string]string{
-			"autoTLS":                          "Enabled",
+			"external-domain-tls":              "Enabled",
 			"namespace-wildcard-cert-selector": "{}",
 		},
 		wantCertName: "testns.default.com",
@@ -614,7 +629,7 @@ func kubeNamespaceWithLabelValue(name string, labels map[string]string) *corev1.
 func networkConfig() *netcfg.Config {
 	return &netcfg.Config{
 		DomainTemplate:                defaultDomainTemplate,
-		AutoTLS:                       true,
+		ExternalDomainTLS:             true,
 		DefaultCertificateClass:       testCertClass,
 		NamespaceWildcardCertSelector: &metav1.LabelSelector{},
 	}
@@ -622,8 +637,8 @@ func networkConfig() *netcfg.Config {
 
 func domainConfig() *routecfg.Domain {
 	domainConfig := &routecfg.Domain{
-		Domains: map[string]*routecfg.LabelSelector{
-			"example.com": {},
+		Domains: map[string]routecfg.DomainConfig{
+			"example.com": {Type: routecfg.DomainTypeWildcard},
 		},
 	}
 	return domainConfig

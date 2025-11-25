@@ -90,7 +90,6 @@ func TestBYOCertificate(t *testing.T) {
 			corev1.TLSPrivateKeyKey: key,
 		},
 	}, metav1.CreateOptions{})
-
 	if err != nil {
 		t.Fatalf("Secret creation could not be completed: %v", err)
 	}
@@ -117,7 +116,8 @@ func TestBYOCertificate(t *testing.T) {
 			},
 			TLS: &v1beta1.SecretTLS{
 				SecretName: secret.Name,
-			}},
+			},
+		},
 		Status: v1beta1.DomainMappingStatus{},
 	}
 
@@ -129,7 +129,7 @@ func TestBYOCertificate(t *testing.T) {
 		clients.ServingBetaClient.DomainMappings.Delete(ctx, dm.Name, metav1.DeleteOptions{})
 	})
 
-	err = wait.PollImmediate(test.PollInterval, test.PollTimeout, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, test.PollInterval, test.PollTimeout, true, func(context.Context) (bool, error) {
 		dm, err := clients.ServingBetaClient.DomainMappings.Get(ctx, dm.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err

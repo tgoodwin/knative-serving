@@ -21,9 +21,10 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"sync/atomic"
 
-	"go.uber.org/atomic"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -170,7 +171,8 @@ type revisionThrottler struct {
 func newRevisionThrottler(revID types.NamespacedName,
 	containerConcurrency int, proto string,
 	breakerParams queue.BreakerParams,
-	logger *zap.SugaredLogger) *revisionThrottler {
+	logger *zap.SugaredLogger,
+) *revisionThrottler {
 	logger = logger.With(zap.String(logkey.Key, revID.String()))
 	var (
 		revBreaker breaker
@@ -189,32 +191,36 @@ func newRevisionThrottler(revID types.NamespacedName,
 		revBreaker = queue.NewBreaker(breakerParams)
 		lbp = newRoundRobinPolicy()
 	}
-	return &revisionThrottler{
+	t := &revisionThrottler{
 		revID:                revID,
 		containerConcurrency: containerConcurrency,
 		breaker:              revBreaker,
 		logger:               logger,
 		protocol:             proto,
-		activatorIndex:       *atomic.NewInt32(-1), // Start with unknown.
 		lbPolicy:             lbp,
 	}
+
+	// Start with unknown
+	t.activatorIndex.Store(-1)
+	return t
 }
 
 func noop() {}
 
 // Returns a dest that at the moment of choosing had an open slot
 // for request.
-func (rt *revisionThrottler) acquireDest(ctx context.Context) (func(), *podTracker) {
+func (rt *revisionThrottler) acquireDest(ctx context.Context) (func(), *podTracker, bool) {
 	rt.mux.RLock()
 	defer rt.mux.RUnlock()
 
 	if rt.clusterIPTracker != nil {
-		return noop, rt.clusterIPTracker
+		return noop, rt.clusterIPTracker, true
 	}
-	return rt.lbPolicy(ctx, rt.assignedTrackers)
+	f, lbTracker := rt.lbPolicy(ctx, rt.assignedTrackers)
+	return f, lbTracker, false
 }
 
-func (rt *revisionThrottler) try(ctx context.Context, function func(string) error) error {
+func (rt *revisionThrottler) try(ctx context.Context, function func(dest string, isClusterIP bool) error) error {
 	var ret error
 
 	// Retrying infinitely as long as we receive no dest. Outer semaphore and inner
@@ -224,7 +230,7 @@ func (rt *revisionThrottler) try(ctx context.Context, function func(string) erro
 	for reenqueue {
 		reenqueue = false
 		if err := rt.breaker.Maybe(ctx, func() {
-			cb, tracker := rt.acquireDest(ctx)
+			cb, tracker, isClusterIP := rt.acquireDest(ctx)
 			if tracker == nil {
 				// This can happen if individual requests raced each other or if pod
 				// capacity was decreased after passing the outer semaphore.
@@ -233,7 +239,7 @@ func (rt *revisionThrottler) try(ctx context.Context, function func(string) erro
 			}
 			defer cb()
 			// We already reserved a guaranteed spot. So just execute the passed functor.
-			ret = function(tracker.dest)
+			ret = function(tracker.dest, isClusterIP)
 		}); err != nil {
 			return err
 		}
@@ -242,7 +248,7 @@ func (rt *revisionThrottler) try(ctx context.Context, function func(string) erro
 }
 
 func (rt *revisionThrottler) calculateCapacity(backendCount, numTrackers, activatorCount int) int {
-	targetCapacity := 0
+	var targetCapacity int
 	if numTrackers > 0 {
 		// Capacity is computed based off of number of trackers,
 		// when using pod direct routing.
@@ -308,7 +314,7 @@ func (rt *revisionThrottler) updateCapacity(backendCount int) {
 		assigned := rt.podTrackers
 		if rt.containerConcurrency > 0 {
 			rt.resetTrackers()
-			assigned = assignSlice(rt.podTrackers, ai, ac, rt.containerConcurrency)
+			assigned = assignSlice(rt.podTrackers, ai, ac)
 		}
 		rt.logger.Debugf("Trackers %d/%d: assignment: %v", ai, ac, assigned)
 		// The actual write out of the assigned trackers has to be under lock.
@@ -374,7 +380,7 @@ func pickIndices(numTrackers, selfIndex, numActivators int) (beginIndex, endInde
 // for this Activator instance. This only matters in case of direct
 // to pod IP routing, and is irrelevant, when ClusterIP is used.
 // assignSlice should receive podTrackers sorted by address.
-func assignSlice(trackers []*podTracker, selfIndex, numActivators, cc int) []*podTracker {
+func assignSlice(trackers []*podTracker, selfIndex, numActivators int) []*podTracker {
 	// When we're unassigned, doesn't matter what we return.
 	lt := len(trackers)
 	if selfIndex == -1 || lt <= 1 {
@@ -513,7 +519,7 @@ func (t *Throttler) run(updateCh <-chan revisionDestsUpdate) {
 }
 
 // Try waits for capacity and then executes function, passing in a l4 dest to send a request
-func (t *Throttler) Try(ctx context.Context, revID types.NamespacedName, function func(string) error) error {
+func (t *Throttler) Try(ctx context.Context, revID types.NamespacedName, function func(dest string, isClusterIP bool) error) error {
 	rt, err := t.getOrCreateRevisionThrottler(revID)
 	if err != nil {
 		return err
@@ -626,7 +632,8 @@ func (rt *revisionThrottler) handlePubEpsUpdate(eps *corev1.Endpoints, selfIP st
 	}
 
 	// We are using List to have the IP addresses sorted for consistent results.
-	epsL := epSet.List()
+	epsL := sets.List(epSet)
+	//nolint:gosec // number of k8s replicas is bounded by int32
 	newNA, newAI := int32(len(epsL)), int32(inferIndex(epsL, selfIP))
 	if newAI == -1 {
 		// No need to do anything, this activator is not in path.

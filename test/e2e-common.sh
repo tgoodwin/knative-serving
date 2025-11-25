@@ -15,13 +15,13 @@
 # limitations under the License.
 
 # This script provides helper methods to perform cluster actions.
-# shellcheck disable=SC1090
 source "$(dirname "${BASH_SOURCE[0]}")/../vendor/knative.dev/hack/e2e-tests.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/e2e-networking-library.sh"
 
 export CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-"latest"}
 # Since default is istio, make default ingress as istio
 export INGRESS_CLASS=${INGRESS_CLASS:-istio.ingress.networking.knative.dev}
+export GATEWAY_API_IMPLEMENTATION=${GATEWAY_API_IMPLEMENTATION:-"istio"}
 export ISTIO_VERSION=${ISTIO_VERSION:-"latest"}
 export KOURIER_VERSION=${KOURIER_VERSION:-""}
 export CONTOUR_VERSION=${CONTOUR_VERSION:-""}
@@ -30,14 +30,13 @@ export CERTIFICATE_CLASS=${CERTIFICATE_CLASS:-""}
 # Only build linux/amd64 bit images
 export KO_FLAGS="${KO_FLAGS:---platform=linux/amd64}"
 
-export RUN_HTTP01_AUTO_TLS_TESTS=${RUN_HTTP01_AUTO_TLS_TESTS:-0}
+export RUN_HTTP01_EXTERNAL_DOMAIN_TLS_TESTS=${RUN_HTTP01_EXTERNAL_DOMAIN_TLS_TESTS:-0}
 export HTTPS=${HTTPS:-0}
 export SHORT=${SHORT:-0}
 export ENABLE_HA=${ENABLE_HA:-0}
 export ENABLE_TLS=${ENABLE_TLS:-0}
 export MESH=${MESH:-0}
 export AMBIENT=${AMBIENT:-0}
-export PERF=${PERF:-0}
 export KIND=${KIND:-0}
 export CLUSTER_DOMAIN=${CLUSTER_DOMAIN:-cluster.local}
 
@@ -119,8 +118,8 @@ function parse_flags() {
       readonly CERTIFICATE_CLASS="cert-manager.certificate.networking.knative.dev"
       return 2
       ;;
-    --run-http01-auto-tls-tests)
-      readonly RUN_HTTP01_AUTO_TLS_TESTS=1
+    --run-http01-external-domain-tls-tests)
+      readonly RUN_HTTP01_EXTERNAL_DOMAIN_TLS_TESTS=1
       return 1
       ;;
     --mesh)
@@ -129,10 +128,6 @@ function parse_flags() {
       ;;
     --no-mesh)
       readonly MESH=0
-      return 1
-      ;;
-    --perf)
-      readonly PERF=1
       return 1
       ;;
     --enable-ha)
@@ -178,8 +173,14 @@ function parse_flags() {
       ;;
     --gateway-api-version)
       # currently, the value of --gateway-api-version is ignored
-      # latest version of Contour pinned in third_party will be installed
+      # latest version of Gateway API pinned in third_party will be installed
       readonly GATEWAY_API_VERSION=$2
+      readonly INGRESS_CLASS="gateway-api.ingress.networking.knative.dev"
+      readonly SHORT=1
+      return 2
+      ;;
+    --gateway-api-implementation)
+      readonly GATEWAY_API_IMPLEMENTATION=$2
       readonly INGRESS_CLASS="gateway-api.ingress.networking.knative.dev"
       readonly SHORT=1
       return 2
@@ -245,9 +246,16 @@ function knative_setup() {
     fi
   fi
 
-  # Install gateway-api and istio. Gateway API CRD must be installed before Istio.
+  # Install gateway-api and istio or contour. Gateway API CRD must be installed before Istio.
   if is_ingress_class gateway-api; then
-    stage_gateway_api_resources
+    if [[ -z "${GATEWAY_API_IMPLEMENTATION}" || "${GATEWAY_API_IMPLEMENTATION}" == "istio" ]]; then
+      stage_istio_gateway_api_resources
+    elif [[ "${GATEWAY_API_IMPLEMENTATION}" == "contour" ]]; then
+      stage_contour_gateway_api_resources
+    else
+      echo "Only Gateway API with either Istio or Contour is currently supported in the e2e test matrix."
+      exit 1
+    fi
   fi
 
   stage_test_resources
@@ -283,21 +291,26 @@ function install() {
     "${REPO_ROOT_DIR}/test/config/ytt/core"
   )
 
+  local ingress_impl="${GATEWAY_API_IMPLEMENTATION}"
   if is_ingress_class istio; then
     # Istio - see cluster_setup for how the files are staged
     YTT_FILES+=("${E2E_YAML_DIR}/istio/${ingress_version}/install")
   elif is_ingress_class gateway-api; then
-    # This installs an istio version that works with the v1alpha1 gateway api
-    YTT_FILES+=("${E2E_YAML_DIR}/gateway-api/install")
-    YTT_FILES+=("${REPO_ROOT_DIR}/third_party/${ingress}-latest")
+    # This installs an istio/contour version that works with the v1 gateway api
+    YTT_FILES+=("${E2E_YAML_DIR}/gateway-api/install-${ingress_impl}")
+    YTT_FILES+=("${REPO_ROOT_DIR}/third_party/${ingress}-latest/gateway-api.yaml")
+    YTT_FILES+=("${REPO_ROOT_DIR}/third_party/${ingress}-latest/net-gateway-api.yaml")
+    YTT_FILES+=("${REPO_ROOT_DIR}/third_party/${ingress}-latest/${ingress_impl}-gateway.yaml")
+    YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/ingress/${ingress}-${ingress_impl}")
   else
     YTT_FILES+=("${REPO_ROOT_DIR}/third_party/${ingress}-latest")
   fi
 
   YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/ingress/${ingress}")
   YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/certmanager/kapp-order.yaml")
+  YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/certmanager/kapp-secret-upgrade.yaml")
+  YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/certmanager/net-certmanager-config.yaml")
   YTT_FILES+=("${REPO_ROOT_DIR}/third_party/cert-manager-${CERT_MANAGER_VERSION}/cert-manager.yaml")
-  YTT_FILES+=("${REPO_ROOT_DIR}/third_party/cert-manager-${CERT_MANAGER_VERSION}/net-certmanager.yaml")
 
   if (( MESH )); then
     YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/mesh")
@@ -312,10 +325,6 @@ function install() {
     YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/ha")
   fi
 
-  if (( PERF )); then
-    YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/performance")
-  fi
-
   if (( KIND )); then
     YTT_FILES+=("${REPO_ROOT_DIR}/test/config/ytt/kind/core")
   fi
@@ -326,10 +335,6 @@ function install() {
 
   if (( QUOTA )); then
     YTT_FILES+=("${REPO_ROOT_DIR}/test/config/resource-quota/resource-quota.yaml")
-  fi
-
-  if (( ENABLE_TLS )); then
-    YTT_FILES+=("${REPO_ROOT_DIR}/test/config/tls/cert-secret.yaml")
   fi
 
   local ytt_result=$(mktemp)
@@ -384,19 +389,21 @@ function install() {
   fi
 
   if (( ENABLE_TLS )); then
-    echo "Patch to config-network to enable internal encryption"
-    toggle_feature internal-encryption true config-network
-    if [[ "$INGRESS_CLASS" == "kourier.ingress.networking.knative.dev" ]]; then
-      echo "Point Kourier local gateway to custom server certificates"
-      toggle_feature cluster-cert-secret server-certs config-kourier
-      # This needs to match the name of Secret in test/config/tls/cert-secret.yaml
-      export CA_CERT=ca-cert
-      # This needs to match $san from test/config/tls/generate.sh
-      export SERVER_NAME=knative.dev
+    if [[ "$INGRESS_CLASS" == "kourier.ingress.networking.knative.dev" ]] || [[ "$INGRESS_CLASS" == "contour.ingress.networking.knative.dev" ]]; then
+      echo "Patch config-network to enable system-internal-tls feature (kourier/contour)"
+      toggle_feature system-internal-tls enabled config-network
     fi
+    if [[ "$INGRESS_CLASS" == "kourier.ingress.networking.knative.dev" ]] || [[ "$INGRESS_CLASS" == "istio.ingress.networking.knative.dev" ]] || [[ "$INGRESS_CLASS" == "contour.ingress.networking.knative.dev" ]]; then
+      echo "Patch config-network to enable cluster-local-domain-tls feature (kourier/istio/contour)"
+      toggle_feature cluster-local-domain-tls enabled config-network
+    fi
+
+    echo "Restart controller to enable the certificate reconciler"
+    restart_pod ${SYSTEM_NAMESPACE} "app=controller"
     echo "Restart activator to mount the certificates"
-    kubectl delete pod -n ${SYSTEM_NAMESPACE} -l app=activator
-    kubectl wait --timeout=60s --for=condition=Available deployment  -n ${SYSTEM_NAMESPACE} activator
+    restart_pod ${SYSTEM_NAMESPACE} "app=activator"
+    kubectl wait --timeout=60s --for=condition=Available deployment -n ${SYSTEM_NAMESPACE} activator
+    kubectl wait --timeout=60s --for=condition=Available deployment -n ${SYSTEM_NAMESPACE} controller
   fi
 }
 
@@ -419,7 +426,7 @@ function test_setup() {
 
   # Install kail if needed.
   if ! which kail > /dev/null; then
-    bash <( curl -sfL https://raw.githubusercontent.com/boz/kail/master/godownloader.sh) -b "$GOPATH/bin"
+    go install github.com/boz/kail/cmd/kail@v0.17.4
   fi
 
   # Capture all logs.
@@ -462,12 +469,20 @@ function wait_for_leader_controller() {
   return 1
 }
 
+function restart_pod() {
+  local namespace="$1"
+  local label="$2"
+  echo -n "Deleting pod in ${namespace} with label ${label}"
+  kubectl -n ${namespace} delete pod -l ${label}
+}
+
 function toggle_feature() {
   local FEATURE="$1"
   local STATE="$2"
   local CONFIG="${3:-config-features}"
   echo -n "Setting feature ${FEATURE} to ${STATE}"
-  kubectl patch cm "${CONFIG}" -n "${SYSTEM_NAMESPACE}" -p '{"data":{"'${FEATURE}'":"'${STATE}'"}}'
+  local PATCH="{\"data\":{\"${FEATURE}\":\"${STATE}\"}}"
+  kubectl patch cm "${CONFIG}" -n "${SYSTEM_NAMESPACE}" -p "${PATCH}"
   # We don't have a good mechanism for positive handoff so sleep :(
   echo "Waiting 30s for change to get picked up."
   sleep 30
@@ -613,10 +628,10 @@ function overlay_system_namespace() {
 }
 
 function run_ytt() {
-  go_run github.com/vmware-tanzu/carvel-ytt/cmd/ytt@v0.44.1 "$@"
+  go_run carvel.dev/ytt/cmd/ytt@v0.48.0 "$@"
 }
 
 
 function run_kapp() {
-  go_run github.com/vmware-tanzu/carvel-kapp/cmd/kapp@v0.54.1 "$@"
+  go_run github.com/vmware-tanzu/carvel-kapp/cmd/kapp@v0.60.0 "$@"
 }

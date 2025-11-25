@@ -19,9 +19,12 @@ package kpa
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"knative.dev/pkg/apis/duck"
 	"knative.dev/pkg/injection/clients/dynamicclient"
 	"knative.dev/pkg/logging"
@@ -126,7 +129,7 @@ func paToProbeTarget(pa *autoscalingv1alpha1.PodAutoscaler) string {
 	svc := pkgnet.GetServiceHostname(pa.Status.ServiceName, pa.Namespace)
 	port := netapis.ServicePort(pa.Spec.ProtocolType)
 
-	return fmt.Sprintf("http://%s:%d/%s", svc, port, nethttp.HealthCheckPath)
+	return fmt.Sprintf("http://%s/%s", net.JoinHostPort(svc, strconv.Itoa(port)), nethttp.HealthCheckPath)
 }
 
 // activatorProbe returns true if via probe it determines that the
@@ -140,6 +143,10 @@ func activatorProbe(pa *autoscalingv1alpha1.PodAutoscaler, transport http.RoundT
 }
 
 func lastPodRetention(pa *autoscalingv1alpha1.PodAutoscaler, cfg *autoscalerconfig.Config) time.Duration {
+	// if revision is unreachable, no need to account for last pod retention
+	if pa.Spec.Reachability == autoscalingv1alpha1.ReachabilityUnreachable {
+		return 0
+	}
 	d, ok := pa.ScaleToZeroPodRetention()
 	if ok {
 		return d
@@ -166,7 +173,8 @@ func durationMax(d1, d2 time.Duration) time.Duration {
 }
 
 func (ks *scaler) handleScaleToZero(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler,
-	sks *netv1alpha1.ServerlessService, desiredScale int32) (int32, bool) {
+	sks *netv1alpha1.ServerlessService, desiredScale int32,
+) (int32, bool) {
 	if desiredScale != 0 {
 		return desiredScale, true
 	}
@@ -193,7 +201,7 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *autoscalingv1alpha1
 		activationTimeout = cfgD.ProgressDeadline + activationTimeoutBuffer
 	}
 
-	now := time.Now()
+	now := simclock.Now()
 	logger := logging.FromContext(ctx)
 	switch {
 	case pa.Status.IsActivating(): // Active=Unknown
@@ -292,7 +300,8 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *autoscalingv1alpha1
 }
 
 func (ks *scaler) applyScale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler, desiredScale int32,
-	ps *autoscalingv1alpha1.PodScalable) error {
+	ps *autoscalingv1alpha1.PodScalable,
+) error {
 	logger := logging.FromContext(ctx)
 
 	gvr, name, err := resources.ScaleResourceArguments(pa.Spec.ScaleTargetRef)

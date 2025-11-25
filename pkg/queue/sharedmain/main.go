@@ -18,6 +18,8 @@ package sharedmain
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,27 +28,27 @@ import (
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
-	"go.opencensus.io/plugin/ochttp"
+	"github.com/tgoodwin/kamera/pkg/simclock"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/automaxprocs/maxprocs"
 	"go.uber.org/zap"
-
 	"k8s.io/apimachinery/pkg/types"
 
 	"knative.dev/networking/pkg/certificates"
 	netstats "knative.dev/networking/pkg/http/stats"
 	pkglogging "knative.dev/pkg/logging"
 	"knative.dev/pkg/logging/logkey"
-	"knative.dev/pkg/metrics"
 	pkgnet "knative.dev/pkg/network"
-	"knative.dev/pkg/profiling"
+	"knative.dev/pkg/observability/runtime"
 	"knative.dev/pkg/signals"
-	"knative.dev/pkg/tracing"
-	tracingconfig "knative.dev/pkg/tracing/config"
-	"knative.dev/pkg/tracing/propagation/tracecontextb3"
 	pkghttp "knative.dev/serving/pkg/http"
 	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/networking"
+	"knative.dev/serving/pkg/observability"
 	"knative.dev/serving/pkg/queue"
+	"knative.dev/serving/pkg/queue/certificate"
 	"knative.dev/serving/pkg/queue/readiness"
 )
 
@@ -83,26 +85,18 @@ type config struct {
 	RevisionResponseStartTimeoutSeconds int    `split_words:"true"` // optional
 	RevisionIdleTimeoutSeconds          int    `split_words:"true"` // optional
 	ServingReadinessProbe               string `split_words:"true"` // optional
-	EnableProfiling                     bool   `split_words:"true"` // optional
-	EnableHTTP2AutoDetection            bool   `split_words:"true"` // optional
+
+	// See https://github.com/knative/serving/issues/12387
+	EnableHTTPFullDuplex       bool `split_words:"true"`                      // optional
+	EnableHTTP2AutoDetection   bool `envconfig:"ENABLE_HTTP2_AUTO_DETECTION"` // optional
+	EnableMultiContainerProbes bool `split_words:"true"`
 
 	// Logging configuration
-	ServingLoggingConfig         string `split_words:"true" required:"true"`
-	ServingLoggingLevel          string `split_words:"true" required:"true"`
-	ServingRequestLogTemplate    string `split_words:"true"` // optional
-	ServingEnableRequestLog      bool   `split_words:"true"` // optional
-	ServingEnableProbeRequestLog bool   `split_words:"true"` // optional
+	ServingLoggingConfig string `split_words:"true" required:"true"`
+	ServingLoggingLevel  string `split_words:"true" required:"true"`
 
-	// Metrics configuration
-	ServingRequestMetricsBackend                string `split_words:"true"` // optional
-	ServingRequestMetricsReportingPeriodSeconds int    `split_words:"true"` // optional
-	MetricsCollectorAddress                     string `split_words:"true"` // optional
-
-	// Tracing configuration
-	TracingConfigDebug          bool                      `split_words:"true"` // optional
-	TracingConfigBackend        tracingconfig.BackendType `split_words:"true"` // optional
-	TracingConfigSampleRate     float64                   `split_words:"true"` // optional
-	TracingConfigZipkinEndpoint string                    `split_words:"true"` // optional
+	// Metrics, Tracing and Profiling
+	Observability observability.Config `ignored:"true"`
 
 	Env
 }
@@ -166,7 +160,10 @@ func Main(opts ...Option) error {
 	}
 
 	// Parse the environment.
-	var env config
+	env := config{
+		Observability: *observability.DefaultConfig(),
+	}
+
 	if err := envconfig.Process("", &env); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return err
@@ -178,6 +175,13 @@ func Main(opts ...Option) error {
 	logger, _ := pkglogging.NewLogger(env.ServingLoggingConfig, env.ServingLoggingLevel)
 	defer flush(logger)
 
+	if data := os.Getenv("OBSERVABILITY_CONFIG"); data != "" {
+		err := json.Unmarshal([]byte(data), &env.Observability)
+		if err != nil {
+			logger.Fatal("failed to parse OBSERVABILITY_CONFIG", zap.Error(err))
+		}
+	}
+
 	logger = logger.Named("queueproxy").With(
 		zap.String(logkey.Key, types.NamespacedName{
 			Namespace: env.ServingNamespace,
@@ -186,33 +190,33 @@ func Main(opts ...Option) error {
 		zap.String(logkey.Pod, env.ServingPod))
 
 	d.Logger = logger
-	d.Transport = buildTransport(env)
 
-	if env.TracingConfigBackend != tracingconfig.None {
-		oct := tracing.NewOpenCensusTracer(tracing.WithExporterFull(env.ServingPod, env.ServingPodIP, logger))
-		oct.ApplyConfig(&tracingconfig.Config{
-			Backend:        env.TracingConfigBackend,
-			Debug:          env.TracingConfigDebug,
-			ZipkinEndpoint: env.TracingConfigZipkinEndpoint,
-			SampleRate:     env.TracingConfigSampleRate,
-		})
-		defer oct.Shutdown(context.Background())
-	}
+	mp, tp := SetupObservabilityOrDie(d.Ctx, &env, logger)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := mp.Shutdown(ctx); err != nil {
+			logger.Errorw("Error flushing metrics", zap.Error(err))
+		}
+		if err := tp.Shutdown(ctx); err != nil {
+			logger.Errorw("Error flushing traces", zap.Error(err))
+		}
+	}()
+
+	d.Transport = buildTransport(env, tp, mp)
 
 	// allow extensions to read d and return modified context and transport
 	for _, opts := range opts {
 		opts(&d)
 	}
 
-	// Report stats on Go memory usage every 30 seconds.
-	metrics.MemStatsOrDie(d.Ctx)
-
 	protoStatReporter := queue.NewProtobufStatsReporter(env.ServingPod, reportingPeriod)
 
 	reportTicker := time.NewTicker(reportingPeriod)
 	defer reportTicker.Stop()
 
-	stats := netstats.NewRequestStats(time.Now())
+	stats := netstats.NewRequestStats(simclock.Now())
 	go func() {
 		for now := range reportTicker.C {
 			stat := stats.Report(now)
@@ -223,13 +227,13 @@ func Main(opts ...Option) error {
 	// Setup probe to run for checking user-application healthiness.
 	probe := func() bool { return true }
 	if env.ServingReadinessProbe != "" {
-		probe = buildProbe(logger, env.ServingReadinessProbe, env.EnableHTTP2AutoDetection).ProbeContainer
+		probe = buildProbe(logger, env.ServingReadinessProbe, env.EnableHTTP2AutoDetection, env.EnableMultiContainerProbes).ProbeContainer
 	}
 
 	// Enable TLS when certificate is mounted.
 	tlsEnabled := exists(logger, certPath) && exists(logger, keyPath)
 
-	mainHandler, drainer := mainHandler(d.Ctx, env, d.Transport, probe, stats, logger)
+	mainHandler, drainer := mainHandler(env, d.Transport, probe, stats, logger, mp, tp)
 	adminHandler := adminHandler(d.Ctx, logger, drainer)
 
 	// Enable TLS server when activator server certs are mounted.
@@ -241,20 +245,29 @@ func Main(opts ...Option) error {
 		"metrics": metricsServer(protoStatReporter),
 	}
 
-	if env.EnableProfiling {
-		httpServers["profile"] = profiling.NewServer(profiling.NewHandler(logger, true))
+	if env.Observability.Runtime.ProfilingEnabled() {
+		logger.Info("Rutime profiling enabled")
+		pprof := runtime.NewProfilingServer()
+		pprof.SetEnabled(true)
+		httpServers["profile"] = pprof.Server
 	}
 
-	tlsServers := map[string]*http.Server{
-		"main":  mainServer(":"+env.QueueServingTLSPort, mainHandler),
-		"admin": adminServer(":"+strconv.Itoa(networking.QueueAdminPort), adminHandler),
-	}
+	tlsServers := make(map[string]*http.Server)
+	var certWatcher *certificate.CertWatcher
+	var err error
 
 	if tlsEnabled {
+		tlsServers["main"] = mainServer(":"+env.QueueServingTLSPort, mainHandler)
+		tlsServers["admin"] = adminServer(":"+strconv.Itoa(networking.QueueAdminPort), adminHandler)
+
+		certWatcher, err = certificate.NewCertWatcher(certPath, keyPath, 1*time.Minute, logger)
+		if err != nil {
+			logger.Fatal("failed to create certWatcher", zap.Error(err))
+		}
+		defer certWatcher.Stop()
+
 		// Drop admin http server since the admin TLS server is listening on the same port
 		delete(httpServers, "admin")
-	} else {
-		tlsServers = map[string]*http.Server{}
 	}
 
 	logger.Info("Starting queue-proxy")
@@ -271,9 +284,13 @@ func Main(opts ...Option) error {
 	}
 	for name, server := range tlsServers {
 		go func(name string, s *http.Server) {
-			// Don't forward ErrServerClosed as that indicates we're already shutting down.
 			logger.Info("Starting tls server ", name, s.Addr)
-			if err := s.ListenAndServeTLS(certPath, keyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.TLSConfig = &tls.Config{
+				GetCertificate: certWatcher.GetCertificate,
+				MinVersion:     tls.VersionTLS13,
+			}
+			// Don't forward ErrServerClosed as that indicates we're already shutting down.
+			if err := s.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("%s server failed to serve: %w", name, err)
 			}
 		}(name, server)
@@ -303,6 +320,7 @@ func Main(opts ...Option) error {
 				logger.Errorw("Failed to shutdown server", zap.String("server", name), zap.Error(err))
 			}
 		}
+
 		logger.Info("Shutdown complete, exiting...")
 	}
 	return nil
@@ -316,18 +334,18 @@ func exists(logger *zap.SugaredLogger, filename string) bool {
 	return err == nil
 }
 
-func buildProbe(logger *zap.SugaredLogger, encodedProbe string, autodetectHTTP2 bool) *readiness.Probe {
-	coreProbe, err := readiness.DecodeProbe(encodedProbe)
+func buildProbe(logger *zap.SugaredLogger, encodedProbe string, autodetectHTTP2 bool, multiContainerProbes bool) *readiness.Probe {
+	coreProbes, err := readiness.DecodeProbes(encodedProbe, multiContainerProbes)
 	if err != nil {
 		logger.Fatalw("Queue container failed to parse readiness probe", zap.Error(err))
 	}
 	if autodetectHTTP2 {
-		return readiness.NewProbeWithHTTP2AutoDetection(coreProbe)
+		return readiness.NewProbeWithHTTP2AutoDetection(coreProbes)
 	}
-	return readiness.NewProbe(coreProbe)
+	return readiness.NewProbe(coreProbes)
 }
 
-func buildTransport(env config) http.RoundTripper {
+func buildTransport(env config, tp trace.TracerProvider, mp metric.MeterProvider) http.RoundTripper {
 	maxIdleConns := 1000 // TODO: somewhat arbitrary value for CC=0, needs experimental validation.
 	if env.ContainerConcurrency > 0 {
 		maxIdleConns = env.ContainerConcurrency
@@ -335,14 +353,11 @@ func buildTransport(env config) http.RoundTripper {
 	// set max-idle and max-idle-per-host to same value since we're always proxying to the same host.
 	transport := pkgnet.NewProxyAutoTransport(maxIdleConns /* max-idle */, maxIdleConns /* max-idle-per-host */)
 
-	if env.TracingConfigBackend == tracingconfig.None {
-		return transport
-	}
-
-	return &ochttp.Transport{
-		Base:        transport,
-		Propagation: tracecontextb3.TraceContextB3Egress,
-	}
+	return otelhttp.NewTransport(
+		transport,
+		otelhttp.WithTracerProvider(tp),
+		otelhttp.WithMeterProvider(mp),
+	)
 }
 
 func buildBreaker(logger *zap.SugaredLogger, env config) *queue.Breaker {
@@ -362,19 +377,6 @@ func buildBreaker(logger *zap.SugaredLogger, env config) *queue.Breaker {
 	return queue.NewBreaker(params)
 }
 
-func supportsMetrics(ctx context.Context, logger *zap.SugaredLogger, env config) bool {
-	// Setup request metrics reporting for end-user metrics.
-	if env.ServingRequestMetricsBackend == "" {
-		return false
-	}
-	if err := setupMetricsExporter(ctx, logger, env.ServingRequestMetricsBackend, env.ServingRequestMetricsReportingPeriodSeconds, env.MetricsCollectorAddress); err != nil {
-		logger.Errorw("Error setting up request metrics exporter. Request metrics will be unavailable.", zap.Error(err))
-		return false
-	}
-
-	return true
-}
-
 func requestLogHandler(logger *zap.SugaredLogger, currentHandler http.Handler, env config) http.Handler {
 	revInfo := &pkghttp.RequestLogRevision{
 		Name:          env.ServingRevision,
@@ -384,8 +386,14 @@ func requestLogHandler(logger *zap.SugaredLogger, currentHandler http.Handler, e
 		PodName:       env.ServingPod,
 		PodIP:         env.ServingPodIP,
 	}
-	handler, err := pkghttp.NewRequestLogHandler(currentHandler, logging.NewSyncFileWriter(os.Stdout), env.ServingRequestLogTemplate,
-		pkghttp.RequestLogTemplateInputGetterFromRevision(revInfo), env.ServingEnableProbeRequestLog)
+
+	handler, err := pkghttp.NewRequestLogHandler(
+		currentHandler,
+		logging.NewSyncFileWriter(os.Stdout),
+		env.Observability.RequestLogTemplate,
+		pkghttp.RequestLogTemplateInputGetterFromRevision(revInfo),
+		env.Observability.EnableProbeRequestLog,
+	)
 	if err != nil {
 		logger.Errorw("Error setting up request logger. Request logs will be unavailable.", zap.Error(err))
 		return currentHandler
@@ -393,19 +401,13 @@ func requestLogHandler(logger *zap.SugaredLogger, currentHandler http.Handler, e
 	return handler
 }
 
-func requestMetricsHandler(logger *zap.SugaredLogger, currentHandler http.Handler, env config) http.Handler {
-	h, err := queue.NewRequestMetricsHandler(currentHandler, env.ServingNamespace,
-		env.ServingService, env.ServingConfiguration, env.ServingRevision, env.ServingPod)
-	if err != nil {
-		logger.Errorw("Error setting up request metrics reporter. Request metrics will be unavailable.", zap.Error(err))
-		return currentHandler
-	}
-	return h
-}
-
-func requestAppMetricsHandler(logger *zap.SugaredLogger, currentHandler http.Handler, breaker *queue.Breaker, env config) http.Handler {
-	h, err := queue.NewAppRequestMetricsHandler(currentHandler, breaker, env.ServingNamespace,
-		env.ServingService, env.ServingConfiguration, env.ServingRevision, env.ServingPod)
+func requestAppMetricsHandler(
+	logger *zap.SugaredLogger,
+	currentHandler http.Handler,
+	breaker *queue.Breaker,
+	mp metric.MeterProvider,
+) http.Handler {
+	h, err := queue.NewAppRequestMetricsHandler(mp, currentHandler, breaker)
 	if err != nil {
 		logger.Errorw("Error setting up app request metrics reporter. Request metrics will be unavailable.", zap.Error(err))
 		return currentHandler
@@ -413,29 +415,8 @@ func requestAppMetricsHandler(logger *zap.SugaredLogger, currentHandler http.Han
 	return h
 }
 
-func setupMetricsExporter(ctx context.Context, logger *zap.SugaredLogger, backend string, reportingPeriod int, collectorAddress string) error {
-	// Set up OpenCensus exporter.
-	// NOTE: We use revision as the component instead of queue because queue is
-	// implementation specific. The current metrics are request relative. Using
-	// revision is reasonable.
-	// TODO(yanweiguo): add the ability to emit metrics with names not combined
-	// to component.
-	ops := metrics.ExporterOptions{
-		Domain:         metrics.Domain(),
-		Component:      "revision",
-		PrometheusPort: networking.UserQueueMetricsPort,
-		ConfigMap: map[string]string{
-			metrics.BackendDestinationKey:      backend,
-			"metrics.opencensus-address":       collectorAddress,
-			"metrics.reporting-period-seconds": strconv.Itoa(reportingPeriod),
-		},
-	}
-	return metrics.UpdateExporter(ctx, ops, logger)
-}
-
 func flush(logger *zap.SugaredLogger) {
 	logger.Sync()
 	os.Stdout.Sync()
 	os.Stderr.Sync()
-	metrics.FlushExporter()
 }

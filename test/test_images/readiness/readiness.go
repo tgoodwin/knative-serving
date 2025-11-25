@@ -22,16 +22,20 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
 	"knative.dev/serving/test"
 )
 
+const (
+	defaultPort = "8080"
+)
+
 var (
-	healthy bool
-	mu      sync.Mutex
+	healthy         bool
+	mu              sync.Mutex
+	livenessCounter int
 )
 
 func main() {
@@ -72,34 +76,43 @@ func main() {
 	mainServer := http.NewServeMux()
 	mainServer.HandleFunc("/", handleMain)
 	mainServer.HandleFunc("/start-failing", handleStartFailing)
+	// When the same image is used for a sidecar container, it is possible to give it
+	// a signal to start failing readiness. The request is sent to $FORWARD_PORT in the sidecar.
+	mainServer.HandleFunc("/start-failing-sidecar", handleStartFailingSidecar)
 
 	probeServer := http.NewServeMux()
-	probeServer.HandleFunc("/", handleHealthz)
+	probeServer.HandleFunc("/readiness", handleReadiness)
+	probeServer.HandleFunc("/liveness", handleLiveness)
 
-	if env := os.Getenv("HEALTHCHECK_PORT"); env != "" {
-		healthcheckPort, _ := strconv.Atoi(env)
+	if healthcheckPort := os.Getenv("HEALTHCHECK_PORT"); healthcheckPort != "" {
 		go func() {
-			http.ListenAndServe(":"+strconv.Itoa(healthcheckPort), probeServer)
+			http.ListenAndServe(":"+healthcheckPort, probeServer)
 		}()
 	} else {
-		mainServer.HandleFunc("/healthz", handleHealthz)
+		mainServer.HandleFunc("/healthz/readiness", handleReadiness)
+		mainServer.HandleFunc("/healthz/liveness", handleLiveness)
+		mainServer.HandleFunc("/healthz/livenessCounter", handleLivenessCounter)
 	}
 
-	http.ListenAndServe(":8080", mainServer)
+	mainServer.HandleFunc("/query", handleQuery)
+
+	http.ListenAndServe(":"+getServerPort(), mainServer)
 }
 
 func execProbeMain() {
-	resp, err := http.Get(os.ExpandEnv("http://localhost:$PORT/healthz"))
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/healthz/readiness", getServerPort()))
 	if err != nil {
 		log.Fatal("Failed to probe: ", err)
 	}
+	resp.Body.Close()
 	if resp.StatusCode > 299 {
 		os.Exit(1)
+		return
 	}
 	os.Exit(0)
 }
 
-func handleStartFailing(w http.ResponseWriter, r *http.Request) {
+func handleStartFailing(w http.ResponseWriter, _ *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -107,7 +120,15 @@ func handleStartFailing(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "will now fail readiness")
 }
 
-func handleHealthz(w http.ResponseWriter, r *http.Request) {
+func handleStartFailingSidecar(_ http.ResponseWriter, _ *http.Request) {
+	resp, err := http.Get(os.ExpandEnv("http://localhost:$FORWARD_PORT/start-failing"))
+	if err != nil {
+		log.Fatalf("GET to /start-failing failed: %v", err)
+	}
+	defer resp.Body.Close()
+}
+
+func handleReadiness(w http.ResponseWriter, _ *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -118,6 +139,41 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, test.HelloWorldText)
 }
 
-func handleMain(w http.ResponseWriter, r *http.Request) {
+func handleLiveness(w http.ResponseWriter, _ *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !healthy {
+		http.Error(w, "not healthy", http.StatusInternalServerError)
+		return
+	}
+
+	livenessCounter++
+
+	fmt.Fprint(w, livenessCounter)
+}
+
+func handleLivenessCounter(w http.ResponseWriter, _ *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	fmt.Fprint(w, livenessCounter)
+}
+
+func handleQuery(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("probe") == "ok" {
+		fmt.Fprint(w, test.HelloWorldText)
+	}
+	http.Error(w, "no query", http.StatusInternalServerError)
+}
+
+func handleMain(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprint(w, test.HelloWorldText)
+}
+
+func getServerPort() string {
+	if port := os.Getenv("PORT"); port != "" {
+		return port
+	}
+	return defaultPort
 }

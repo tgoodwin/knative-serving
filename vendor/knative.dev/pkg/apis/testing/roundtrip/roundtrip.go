@@ -26,7 +26,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	fuzz "github.com/google/gofuzz"
 	"k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
 	"k8s.io/apimachinery/pkg/api/apitesting/roundtrip"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -37,6 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/randfill"
+
 	"knative.dev/pkg/apis"
 )
 
@@ -135,7 +136,7 @@ func ExternalTypesViaHub(t *testing.T, scheme, hubs *runtime.Scheme, fuzzerFuncs
 			continue
 		}
 
-		if reflect.PtrTo(objType).AssignableTo(metaV1ListType) {
+		if reflect.PointerTo(objType).AssignableTo(metaV1ListType) {
 			continue
 		}
 
@@ -144,7 +145,7 @@ func ExternalTypesViaHub(t *testing.T, scheme, hubs *runtime.Scheme, fuzzerFuncs
 		}
 
 		t.Run(gvk.Group+"."+gvk.Version+"."+gvk.Kind, func(t *testing.T) {
-			for i := 0; i < *roundtrip.FuzzIters; i++ {
+			for range *roundtrip.FuzzIters {
 				roundTripViaHub(t, gvk, scheme, hubs, f)
 
 				if t.Failed() {
@@ -155,7 +156,7 @@ func ExternalTypesViaHub(t *testing.T, scheme, hubs *runtime.Scheme, fuzzerFuncs
 	}
 }
 
-func roundTripViaHub(t *testing.T, gvk schema.GroupVersionKind, scheme, hubs *runtime.Scheme, f *fuzz.Fuzzer) {
+func roundTripViaHub(t *testing.T, gvk schema.GroupVersionKind, scheme, hubs *runtime.Scheme, f *randfill.Filler) {
 	ctx := context.Background()
 
 	hub, hubGVK := hubInstanceForGK(t, hubs, gvk.GroupKind())
@@ -203,7 +204,6 @@ func objForGVK(t *testing.T,
 	gvk schema.GroupVersionKind,
 	scheme *runtime.Scheme,
 ) convertibleObject {
-
 	t.Helper()
 
 	obj, err := scheme.New(gvk)
@@ -220,8 +220,8 @@ func objForGVK(t *testing.T,
 	return obj.(convertibleObject)
 }
 
-func fuzzObject(t *testing.T, fuzzer *fuzz.Fuzzer, gvk schema.GroupVersionKind, obj interface{}) {
-	fuzzer.Fuzz(obj)
+func fuzzObject(t *testing.T, fuzzer *randfill.Filler, gvk schema.GroupVersionKind, obj interface{}) {
+	fuzzer.Fill(obj)
 
 	objType, err := apimeta.TypeAccessor(obj)
 	if err != nil {
@@ -235,7 +235,6 @@ func hubInstanceForGK(t *testing.T,
 	hubs *runtime.Scheme,
 	gk schema.GroupKind,
 ) (apis.Convertible, schema.GroupVersionKind) {
-
 	t.Helper()
 
 	for hubGVK := range hubs.AllKnownTypes() {

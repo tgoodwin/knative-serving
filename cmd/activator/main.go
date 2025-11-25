@@ -31,33 +31,29 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	"go.uber.org/zap"
 
-	// Injection related imports.
-	kubeclient "knative.dev/pkg/client/injection/kube/client"
-	"knative.dev/pkg/injection"
-	"knative.dev/serving/pkg/activator"
-	"knative.dev/serving/pkg/http/handler"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+
+	// Injection related imports.
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	network "knative.dev/networking/pkg"
 	netcfg "knative.dev/networking/pkg/config"
 	netprobe "knative.dev/networking/pkg/http/probe"
-	"knative.dev/pkg/configmap"
+	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	configmapinformer "knative.dev/pkg/configmap/informer"
 	"knative.dev/pkg/controller"
+	"knative.dev/pkg/injection"
 	"knative.dev/pkg/injection/sharedmain"
 	pkglogging "knative.dev/pkg/logging"
 	"knative.dev/pkg/logging/logkey"
-	"knative.dev/pkg/metrics"
 	pkgnet "knative.dev/pkg/network"
-	"knative.dev/pkg/profiling"
+	k8sruntime "knative.dev/pkg/observability/runtime/k8s"
 	"knative.dev/pkg/signals"
 	"knative.dev/pkg/system"
-	"knative.dev/pkg/tracing"
-	tracingconfig "knative.dev/pkg/tracing/config"
 	"knative.dev/pkg/version"
 	"knative.dev/pkg/websocket"
+	"knative.dev/serving/pkg/activator"
 	"knative.dev/serving/pkg/activator/certificate"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
 	activatorhandler "knative.dev/serving/pkg/activator/handler"
@@ -65,8 +61,11 @@ import (
 	apiconfig "knative.dev/serving/pkg/apis/config"
 	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
 	pkghttp "knative.dev/serving/pkg/http"
+	"knative.dev/serving/pkg/http/handler"
 	"knative.dev/serving/pkg/logging"
 	"knative.dev/serving/pkg/networking"
+	o11yconfigmap "knative.dev/serving/pkg/observability/configmap"
+	"knative.dev/serving/pkg/observability/otel"
 )
 
 const (
@@ -91,9 +90,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Report stats on Go memory usage every 30 seconds.
-	metrics.MemStatsOrDie(ctx)
-
 	cfg := injection.ParseAndGetRESTConfigOrDie()
 
 	log.Printf("Registering %d clients", len(injection.Default.GetClients()))
@@ -111,7 +107,7 @@ func main() {
 
 	// We sometimes startup faster than we can reach kube-api. Poll on failure to prevent us terminating
 	var err error
-	if perr := wait.PollImmediate(time.Second, 60*time.Second, func() (bool, error) {
+	if perr := wait.PollUntilContextTimeout(ctx, time.Second, 60*time.Second, true, func(context.Context) (bool, error) {
 		if err = version.CheckMinimumVersion(kubeClient.Discovery()); err != nil {
 			log.Print("Failed to get k8s version ", err)
 		}
@@ -127,10 +123,28 @@ func main() {
 	}
 
 	logger, atomicLevel := pkglogging.NewLoggerFromConfig(loggingConfig, component)
-	logger = logger.With(zap.String(logkey.ControllerType, component),
-		zap.String(logkey.Pod, env.PodName))
+	logger = logger.With(
+		zap.String(logkey.ControllerType, component),
+		zap.String(logkey.Pod, env.PodName),
+	)
 	ctx = pkglogging.WithLogger(ctx, logger)
 	defer flush(logger)
+
+	pprof := k8sruntime.NewProfilingServer(logger.Named("pprof"))
+
+	mp, tp := otel.SetupObservabilityOrDie(ctx, "activator", logger, pprof)
+
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := mp.Shutdown(ctx); err != nil {
+			logger.Errorw("Error flushing metrics", zap.Error(err))
+		}
+		if err := tp.Shutdown(ctx); err != nil {
+			logger.Errorw("Error flushing traces", zap.Error(err))
+		}
+	}()
 
 	// Run informers instead of starting them from the factory to prevent the sync hanging because of empty handler.
 	if err := controller.StartInformers(ctx.Done(), informers...); err != nil {
@@ -158,8 +172,8 @@ func main() {
 		logger.Fatalw("Failed to construct network config", zap.Error(err))
 	}
 
-	// Enable TLS against queue-proxy when internal-encryption is enabled.
-	tlsEnabled := networkConfig.InternalEncryption
+	// Enable TLS for connections to queue-proxy when system-internal-tls is enabled.
+	tlsEnabled := networkConfig.SystemInternalTLSEnabled()
 
 	var certCache *certificate.CertCache
 
@@ -167,29 +181,21 @@ func main() {
 	// At this moment activator with TLS does not disable HTTP.
 	// See also https://github.com/knative/serving/issues/12808.
 	if tlsEnabled {
-		logger.Info("Internal Encryption is enabled")
-		certCache = certificate.NewCertCache(ctx)
-		transport = pkgnet.NewProxyAutoTLSTransport(env.MaxIdleProxyConns, env.MaxIdleProxyConnsPerHost, &certCache.TLSConf)
+		logger.Info("Knative system-internal-tls is enabled")
+		certCache, err = certificate.NewCertCache(ctx)
+		if err != nil {
+			logger.Fatalw("Failed to create certificate cache", zap.Error(err))
+		}
+		transport = pkgnet.NewProxyAutoTLSTransport(env.MaxIdleProxyConns, env.MaxIdleProxyConnsPerHost, certCache.TLSContext())
 	}
 
 	// Start throttler.
 	throttler := activatornet.NewThrottler(ctx, env.PodIP)
 	go throttler.Run(ctx, transport, networkConfig.EnableMeshPodAddressability, networkConfig.MeshCompatibilityMode)
 
-	oct := tracing.NewOpenCensusTracer(tracing.WithExporterFull(networking.ActivatorServiceName, env.PodIP, logger))
-	defer oct.Shutdown(context.Background())
-
-	tracerUpdater := configmap.TypeFilter(&tracingconfig.Config{})(func(name string, value interface{}) {
-		cfg := value.(*tracingconfig.Config)
-		if err := oct.ApplyConfig(cfg); err != nil {
-			logger.Errorw("Unable to apply open census tracer config", zap.Error(err))
-			return
-		}
-	})
-
 	// Set up our config store
 	configMapWatcher := configmapinformer.NewInformedWatcher(kubeClient, system.Namespace())
-	configStore := activatorconfig.NewStore(logger, tracerUpdater)
+	configStore := activatorconfig.NewStore(logger)
 	configStore.WatchConfigs(configMapWatcher)
 
 	statCh := make(chan []asmetrics.StatMessage)
@@ -203,19 +209,19 @@ func main() {
 	go activator.ReportStats(logger, statSink, statCh)
 
 	// Create and run our concurrency reporter
-	concurrencyReporter := activatorhandler.NewConcurrencyReporter(ctx, env.PodName, statCh)
+	concurrencyReporter := activatorhandler.NewConcurrencyReporter(ctx, env.PodName, statCh, mp)
 	go concurrencyReporter.Run(ctx.Done())
 
 	// Create activation handler chain
 	// Note: innermost handlers are specified first, ie. the last handler in the chain will be executed first
-	ah := activatorhandler.New(ctx, throttler, transport, networkConfig.EnableMeshPodAddressability, logger, tlsEnabled)
+	ah := activatorhandler.New(ctx, throttler, transport, networkConfig.EnableMeshPodAddressability, logger, tlsEnabled, tp)
 	ah = handler.NewTimeoutHandler(ah, "activator request timeout", func(r *http.Request) (time.Duration, time.Duration, time.Duration) {
 		if rev := activatorhandler.RevisionFrom(r.Context()); rev != nil {
-			var responseStartTimeout = 0 * time.Second
+			responseStartTimeout := 0 * time.Second
 			if rev.Spec.ResponseStartTimeoutSeconds != nil {
 				responseStartTimeout = time.Duration(*rev.Spec.ResponseStartTimeoutSeconds) * time.Second
 			}
-			var idleTimeout = 0 * time.Second
+			idleTimeout := 0 * time.Second
 			if rev.Spec.IdleTimeoutSeconds != nil {
 				idleTimeout = time.Duration(*rev.Spec.IdleTimeoutSeconds) * time.Second
 			}
@@ -226,7 +232,7 @@ func main() {
 			apiconfig.DefaultRevisionIdleTimeoutSeconds * time.Second
 	})
 	ah = concurrencyReporter.Handler(ah)
-	ah = activatorhandler.NewTracingHandler(ah)
+	ah = activatorhandler.NewTracingAttributeHandler(tp, ah)
 	reqLogHandler, err := pkghttp.NewRequestLogHandler(ah, logging.NewSyncFileWriter(os.Stdout), "",
 		requestLogTemplateInputGetter, false /*enableProbeRequestLog*/)
 	if err != nil {
@@ -236,27 +242,31 @@ func main() {
 
 	// NOTE: MetricHandler is being used as the outermost handler of the meaty bits. We're not interested in measuring
 	// the healthchecks or probes.
-	ah = activatorhandler.NewMetricHandler(env.PodName, ah)
+	ah = activatorhandler.NewMetricAttributeHandler(env.PodName, ah)
+	// We need the context handler to run first so ctx gets the revision info.
+	ah = activatorhandler.WrapActivatorHandlerWithFullDuplex(ah, logger)
 	ah = activatorhandler.NewContextHandler(ctx, ah, configStore)
+
+	ah = otelhttp.NewHandler(ah, "handle",
+		otelhttp.WithTracerProvider(tp),
+		otelhttp.WithMeterProvider(mp),
+	)
 
 	// Network probe handlers.
 	ah = &activatorhandler.ProbeHandler{NextHandler: ah}
 	ah = netprobe.NewHandler(ah)
-
 	// Set up our health check based on the health of stat sink and environmental factors.
 	sigCtx := signals.NewContext()
 	hc := newHealthCheck(sigCtx, logger, statSink)
 	ah = &activatorhandler.HealthHandler{HealthCheck: hc, NextHandler: ah, Logger: logger}
 
-	profilingHandler := profiling.NewHandler(logger, false)
 	// Watch the logging config map and dynamically update logging levels.
 	configMapWatcher.Watch(pkglogging.ConfigMapName(), pkglogging.UpdateLevelFromConfigMap(logger, atomicLevel, component))
 
 	// Watch the observability config map
-	configMapWatcher.Watch(metrics.ConfigMapName(),
-		metrics.ConfigMapWatcher(ctx, component, nil /* SecretFetcher */, logger),
+	configMapWatcher.Watch(o11yconfigmap.Name(),
 		updateRequestLogFromConfigMap(logger, reqLogHandler),
-		profilingHandler.UpdateFromConfigMap)
+		pprof.UpdateFromConfigMap)
 
 	if err = configMapWatcher.Start(ctx.Done()); err != nil {
 		logger.Fatalw("Failed to start configuration manager", zap.Error(err))
@@ -265,7 +275,7 @@ func main() {
 	servers := map[string]*http.Server{
 		"http1":   pkgnet.NewServer(":"+strconv.Itoa(networking.BackendHTTPPort), ah),
 		"h2c":     pkgnet.NewServer(":"+strconv.Itoa(networking.BackendHTTP2Port), ah),
-		"profile": profiling.NewServer(profilingHandler),
+		"profile": pprof.Server,
 	}
 
 	errCh := make(chan error, len(servers))
@@ -278,7 +288,7 @@ func main() {
 		}(name, server)
 	}
 
-	// Enable TLS server when internal-encryption is specified.
+	// Enable TLS server when system-internal-tls is specified.
 	// At this moment activator with TLS does not disable HTTP.
 	// See also https://github.com/knative/serving/issues/12808.
 	if tlsEnabled {
@@ -337,5 +347,4 @@ func flush(logger *zap.SugaredLogger) {
 	logger.Sync()
 	os.Stdout.Sync()
 	os.Stderr.Sync()
-	metrics.FlushExporter()
 }

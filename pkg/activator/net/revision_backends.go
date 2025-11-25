@@ -25,9 +25,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
@@ -64,15 +64,15 @@ import (
 type revisionDestsUpdate struct {
 	Rev           types.NamespacedName
 	ClusterIPDest string
-	Dests         sets.String
+	Dests         sets.Set[string]
 }
 
 type dests struct {
-	ready    sets.String
-	notReady sets.String
+	ready    sets.Set[string]
+	notReady sets.Set[string]
 }
 
-func (d dests) becameNonReady(prev dests) sets.String {
+func (d dests) becameNonReady(prev dests) sets.Set[string] {
 	return prev.ready.Intersection(d.notReady)
 }
 
@@ -102,7 +102,7 @@ type revisionWatcher struct {
 	done     chan struct{}
 
 	// Stores the list of pods that have been successfully probed.
-	healthyPods sets.String
+	healthyPods sets.Set[string]
 	// Stores whether the service ClusterIP has been seen as healthy.
 	clusterIPHealthy bool
 
@@ -137,7 +137,8 @@ func newRevisionWatcher(ctx context.Context, rev types.NamespacedName, protocol 
 	transport http.RoundTripper, serviceLister corev1listers.ServiceLister,
 	usePassthroughLb bool, meshMode netcfg.MeshCompatibilityMode,
 	enableProbeOptimisation bool,
-	logger *zap.SugaredLogger) *revisionWatcher {
+	logger *zap.SugaredLogger,
+) *revisionWatcher {
 	ctx, cancel := context.WithCancel(ctx)
 	return &revisionWatcher{
 		stopCh:                  ctx.Done(),
@@ -227,7 +228,7 @@ func (rw *revisionWatcher) probeClusterIP(dest string) (bool, error) {
 // the ones that are successfully probed, whether the update was a no-op, or an error.
 // If probing fails but not all errors were compatible with being caused by
 // mesh being enabled, being enabled, notMesh will be true.
-func (rw *revisionWatcher) probePodIPs(ready, notReady sets.String) (succeeded sets.String, noop bool, notMesh bool, err error) {
+func (rw *revisionWatcher) probePodIPs(ready, notReady sets.Set[string]) (succeeded sets.Set[string], noop bool, notMesh bool, err error) {
 	dests := ready.Union(notReady)
 
 	// Short circuit case where all the current pods are already known to be healthy.
@@ -249,10 +250,11 @@ func (rw *revisionWatcher) probePodIPs(ready, notReady sets.String) (succeeded s
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 
-	probeGroup, egCtx := errgroup.WithContext(ctx)
+	// Empty errgroup is used as cancellation on first error is not desired, all probes should be
+	// attempted even if one fails.
+	var probeGroup errgroup.Group
 	healthyDests := make(chan string, dests.Len())
 
-	var probed bool
 	var sawNotMesh atomic.Bool
 	for dest := range dests {
 		if healthy.Has(dest) {
@@ -260,11 +262,8 @@ func (rw *revisionWatcher) probePodIPs(ready, notReady sets.String) (succeeded s
 			continue
 		}
 
-		probed = true
-
-		dest := dest // Standard Go concurrency pattern.
 		probeGroup.Go(func() error {
-			ok, notMesh, err := rw.probe(egCtx, dest)
+			ok, notMesh, err := rw.probe(ctx, dest)
 			if ok && (ready.Has(dest) || rw.enableProbeOptimisation) {
 				healthyDests <- dest
 			}
@@ -280,8 +279,6 @@ func (rw *revisionWatcher) probePodIPs(ready, notReady sets.String) (succeeded s
 	err = probeGroup.Wait()
 	close(healthyDests)
 
-	unchanged := probed && len(healthyDests) == 0
-
 	for d := range healthyDests {
 		healthy.Insert(d)
 	}
@@ -293,10 +290,13 @@ func (rw *revisionWatcher) probePodIPs(ready, notReady sets.String) (succeeded s
 		}
 	}
 
+	// Unchanged only if we match the incoming healthy set, as this handles all possible updates
+	unchanged := healthy.Equal(rw.healthyPods)
+
 	return healthy, unchanged, sawNotMesh.Load(), err
 }
 
-func (rw *revisionWatcher) sendUpdate(clusterIP string, dests sets.String) {
+func (rw *revisionWatcher) sendUpdate(clusterIP string, dests sets.Set[string]) {
 	select {
 	case <-rw.stopCh:
 		return
@@ -422,8 +422,7 @@ func (rw *revisionWatcher) run(probeFrequency time.Duration) {
 		rw.logger.Debugw("Revision state", zap.Object("dests", curDests),
 			zap.Object("healthy", logging.StringSet(rw.healthyPods)),
 			zap.Bool("clusterIPHealthy", rw.clusterIPHealthy))
-		if len(curDests.ready)+len(curDests.notReady) > 0 && !(rw.clusterIPHealthy ||
-			curDests.ready.Union(curDests.notReady).Equal(rw.healthyPods)) {
+		if len(curDests.ready)+len(curDests.notReady) > 0 && (!rw.clusterIPHealthy && !curDests.ready.Union(curDests.notReady).Equal(rw.healthyPods)) {
 			rw.logger.Debug("Probing on timer")
 			tickCh = timer.C
 		} else {
@@ -470,7 +469,8 @@ func newRevisionBackendsManager(ctx context.Context, tr http.RoundTripper, usePa
 
 // newRevisionBackendsManagerWithProbeFrequency creates a fully spec'd RevisionBackendsManager.
 func newRevisionBackendsManagerWithProbeFrequency(ctx context.Context, tr http.RoundTripper,
-	usePassthroughLb bool, meshMode netcfg.MeshCompatibilityMode, probeFreq time.Duration) *revisionBackendsManager {
+	usePassthroughLb bool, meshMode netcfg.MeshCompatibilityMode, probeFreq time.Duration,
+) *revisionBackendsManager {
 	rbm := &revisionBackendsManager{
 		ctx:              ctx,
 		revisionLister:   revisioninformer.Get(ctx).Lister(),
@@ -535,6 +535,21 @@ func (rbm *revisionBackendsManager) getOrCreateRevisionWatcher(revID types.Names
 		enableProbeOptimisation := true
 		if rp := rev.Spec.GetContainer().ReadinessProbe; rp != nil && rp.Exec != nil {
 			enableProbeOptimisation = false
+		}
+		// Startup probes are executed by Kubelet, so we can only mark the container as ready
+		// once K8s sees it as ready.
+		if sp := rev.Spec.GetContainer().StartupProbe; sp != nil {
+			enableProbeOptimisation = false
+		}
+		// Startup probes for sidecars are executed by Kubelet, so we can only mark the container as ready
+		// once K8s sees it as ready.
+		if len(rev.Spec.GetSidecarContainers()) > 0 {
+			for _, sc := range rev.Spec.GetSidecarContainers() {
+				if sp := sc.StartupProbe; sp != nil {
+					enableProbeOptimisation = false
+					break
+				}
+			}
 		}
 
 		destsCh := make(chan dests)

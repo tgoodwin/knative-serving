@@ -19,7 +19,6 @@ package handlers
 import (
 	"log"
 	"os"
-	"strconv"
 	"strings"
 
 	"knative.dev/serving/test/types"
@@ -31,12 +30,14 @@ var cgroupV1Paths = []string{
 	"/sys/fs/cgroup/memory/memory.limit_in_bytes",
 	"/sys/fs/cgroup/cpu/cpu.cfs_period_us",
 	"/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
-	"/sys/fs/cgroup/cpu/cpu.shares"}
+	"/sys/fs/cgroup/cpu/cpu.shares",
+}
 
 var cgroupV2Paths = []string{
 	"/sys/fs/cgroup/memory.max",
 	"/sys/fs/cgroup/cpu.max",
-	"/sys/fs/cgroup/cpu.weight"}
+	"/sys/fs/cgroup/cpu.weight",
+}
 
 var (
 	yes = true
@@ -69,25 +70,16 @@ func cgroups(paths ...string) []*types.Cgroup {
 		}
 
 		cs := strings.Trim(string(bc), "\n")
-		if path == "/sys/fs/cgroup/cpu.max" {
-			// The format is like 'max 100000' so trim the front "max".
-			cs = strings.Split(cs, " ")[1]
-		}
-		ic, err := strconv.Atoi(cs)
-		if err != nil {
-			cgroups = append(cgroups, &types.Cgroup{Name: path, Error: err.Error()})
-			continue
-		}
 
 		// Try to write to the Cgroup. We expect this to fail as a cheap
 		// method for read-only validation
 		newValue := []byte{'9'}
 		// #nosec G306
-		err = os.WriteFile(path, newValue, 0644)
+		err = os.WriteFile(path, newValue, 0o644)
 		if err != nil {
-			cgroups = append(cgroups, &types.Cgroup{Name: path, Value: &ic, ReadOnly: &yes})
+			cgroups = append(cgroups, &types.Cgroup{Name: path, Value: &cs, ReadOnly: &yes})
 		} else {
-			cgroups = append(cgroups, &types.Cgroup{Name: path, Value: &ic, ReadOnly: &no})
+			cgroups = append(cgroups, &types.Cgroup{Name: path, Value: &cs, ReadOnly: &no})
 		}
 	}
 	return cgroups

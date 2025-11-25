@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	userHeaderKey   = "this-was-user-set"
+	userHeaderKey   = "This-Was-User-Set"
 	userHeaderValue = "a value"
 )
 
@@ -67,9 +67,10 @@ func TestMustHaveHeadersSet(t *testing.T) {
 	matchHeaders(t, headers, expectedHeaders)
 }
 
-// TestMustHaveHeadersSet verified that all headers declared as "SHOULD" in the runtime
+// TestShouldHaveHeadersSet verified that all headers declared as "SHOULD" in the runtime
 // contract are present from the point of view of the user container.
 func TestShouldHaveHeadersSet(t *testing.T) {
+	t.Skip("Skipping due to https://github.com/knative/serving/issues/15949")
 	t.Parallel()
 	clients := test.Setup(t)
 
@@ -160,7 +161,7 @@ func (*checkForwardedHeader) MatchString(s string) bool {
 			return false
 		}
 
-		if value != "" && !(tokenMatcher.MatchString(value) || quotedStringMatcher.MatchString(value)) {
+		if value != "" && (!tokenMatcher.MatchString(value) && !quotedStringMatcher.MatchString(value)) {
 			return false
 		}
 	}

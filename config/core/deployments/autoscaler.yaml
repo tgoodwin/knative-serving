@@ -81,9 +81,6 @@ spec:
           value: config-logging
         - name: CONFIG_OBSERVABILITY_NAME
           value: config-observability
-        # TODO(https://github.com/knative/pkg/pull/953): Remove stackdriver specific config
-        - name: METRICS_DOMAIN
-          value: knative.dev/serving
 
         securityContext:
           allowPrivilegeEscalation: false
@@ -106,15 +103,9 @@ spec:
         readinessProbe:
           httpGet:
             port: 8080
-            httpHeaders:
-            - name: k-kubelet-probe
-              value: "autoscaler"
         livenessProbe:
           httpGet:
             port: 8080
-            httpHeaders:
-            - name: k-kubelet-probe
-              value: "autoscaler"
           failureThreshold: 6
 
 ---

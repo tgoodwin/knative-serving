@@ -61,7 +61,6 @@ import (
 	_ "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/serverlessservice/fake"
 	_ "knative.dev/pkg/client/injection/kube/informers/autoscaling/v2/horizontalpodautoscaler/fake"
 	_ "knative.dev/pkg/client/injection/kube/informers/core/v1/service/fake"
-	_ "knative.dev/pkg/metrics/testing"
 	_ "knative.dev/serving/pkg/client/injection/ducks/autoscaling/v1alpha1/podscalable/fake"
 	_ "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/metric/fake"
 
@@ -331,7 +330,7 @@ func TestReconcile(t *testing.T) {
 		Name: "nop deletion reconcile",
 		// Test that with a DeletionTimestamp we do nothing.
 		Objects: []runtime.Object{
-			pa(testNamespace, testRevision, WithHPAClass, WithPADeletionTimestamp),
+			WithDeletionTimestamp(pa(testNamespace, testRevision, WithHPAClass)),
 			deploy(testNamespace, testRevision),
 		},
 		Key: key(testNamespace, testRevision),
@@ -490,6 +489,7 @@ func withScales(d, a int32) PodAutoscalerOption {
 		pa.Status.DesiredScale, pa.Status.ActualScale = ptr.Int32(d), ptr.Int32(a)
 	}
 }
+
 func withHPAScaleStatus(d, a int32) hpaOption {
 	return func(hpa *autoscalingv2.HorizontalPodAutoscaler) {
 		hpa.Status.DesiredReplicas, hpa.Status.CurrentReplicas = d, a

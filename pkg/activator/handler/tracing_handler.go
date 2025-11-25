@@ -19,22 +19,23 @@ package handler
 import (
 	"net/http"
 
-	"knative.dev/pkg/tracing"
-	tracingconfig "knative.dev/pkg/tracing/config"
-	activatorconfig "knative.dev/serving/pkg/activator/config"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// NewTracingHandler creates a wrapper around tracing.HTTPSpanMiddleware that completely
-// bypasses said handler when tracing is disabled via the Activator's configuration.
-func NewTracingHandler(next http.Handler) http.HandlerFunc {
-	tracingHandler := tracing.HTTPSpanMiddleware(next)
-	return func(w http.ResponseWriter, r *http.Request) {
-		tracingEnabled := activatorconfig.FromContext(r.Context()).Tracing.Backend != tracingconfig.None
-		if !tracingEnabled {
-			next.ServeHTTP(w, r)
-			return
-		}
+// NewTracingAttributeHandler creates a handler that adds serving attributes
+// to the span
+func NewTracingAttributeHandler(tp trace.TracerProvider, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		defer func() {
+			// otelhttp middleware creates the labeler
+			labeler, _ := otelhttp.LabelerFromContext(r.Context())
+			span := trace.SpanFromContext(r.Context())
 
-		tracingHandler.ServeHTTP(w, r)
-	}
+			// otelhttp doesn't add labeler attributes to the span
+			span.SetAttributes(labeler.Get()...)
+		}()
+
+		next.ServeHTTP(rw, r)
+	})
 }

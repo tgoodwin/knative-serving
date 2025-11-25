@@ -19,8 +19,8 @@ package configuration
 import (
 	"context"
 
+	"github.com/tgoodwin/kamera/pkg/simclock"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/clock"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
@@ -47,7 +47,7 @@ func NewController(
 	c := &Reconciler{
 		client:         servingclient.Get(ctx),
 		revisionLister: revisionInformer.Lister(),
-		clock:          &clock.RealClock{},
+		clock:          &simclock.DeterministicClock{},
 	}
 	impl := configreconciler.NewImpl(ctx, c, func(*controller.Impl) controller.Options {
 		return controller.Options{ConfigStore: configStore}

@@ -21,7 +21,6 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,7 +92,7 @@ func setupHPASvc(t *testing.T, metric string, target int) *TestContext {
 				autoscaling.ClassAnnotationKey:    autoscaling.HPA,
 				autoscaling.MetricAnnotationKey:   metric,
 				autoscaling.TargetAnnotationKey:   strconv.Itoa(target),
-				autoscaling.MaxScaleAnnotationKey: fmt.Sprintf("%d", int(maxPods)),
+				autoscaling.MaxScaleAnnotationKey: strconv.Itoa(int(maxPods)),
 				autoscaling.WindowAnnotationKey:   "20s",
 			}), rtesting.WithResourceRequirements(corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
@@ -179,21 +178,14 @@ func assertMemoryHPAAutoscaleUpToNumPods(ctx *TestContext, targetPods float64, d
 
 func generateTrafficAtFixedConcurrencyWithLoad(ctx *TestContext, concurrency int, vegetaParam string, vegetaValue int, stopChan chan struct{}) error {
 	pacer := vegeta.ConstantPacer{} // Sends requests as quickly as possible, capped by MaxWorkers below.
-	tlsConf := vegeta.DefaultTLSConfig
-	if test.ServingFlags.HTTPS {
-		tlsConf = test.TLSClientConfig(context.Background(), ctx.t.Logf, ctx.clients)
-	}
 	attacker := vegeta.NewAttacker(
 		vegeta.Timeout(0), // No timeout is enforced at all.
 		vegeta.Workers(uint64(concurrency)),
 		vegeta.MaxWorkers(uint64(concurrency)),
-		vegeta.TLSConfig(tlsConf))
-	target, err := getVegetaTarget(
-		ctx.clients.KubeClient, ctx.resources.Route.Status.URL.URL().Hostname(), pkgTest.Flags.IngressEndpoint, test.ServingFlags.ResolvableDomain, vegetaParam, vegetaValue, test.ServingFlags.HTTPS)
-	if err != nil {
-		return fmt.Errorf("error creating vegeta target: %w", err)
-	}
+		vegeta.Client(newVegetaHTTPClient(ctx, ctx.resources.Route.Status.URL.URL())),
+	)
 
+	target := getVegetaTarget(ctx.resources.Route.Status.URL.URL().Hostname(), vegetaParam, vegetaValue, test.ServingFlags.HTTPS)
 	ctx.t.Logf("Maintaining %d concurrent requests.", concurrency)
 	return generateTraffic(ctx, attacker, pacer, stopChan, target)
 }
@@ -209,7 +201,7 @@ func assertScaleDownToOne(ctx *TestContext) {
 		context.Background(),
 		ctx.clients.KubeClient,
 		func(p *corev1.PodList) (bool, error) {
-			if !(len(getDepPods(p.Items, deploymentName)) == 1) {
+			if len(getDepPods(p.Items, deploymentName)) != 1 {
 				return false, nil
 			}
 			return true, nil
@@ -254,7 +246,7 @@ func waitForScaleToOne(t *testing.T, deploymentName string, clients *test.Client
 }
 
 func waitForHPAState(t *testing.T, name, namespace string, clients *test.Clients) error {
-	return wait.PollImmediate(time.Second, 15*time.Minute, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), time.Second, 15*time.Minute, true, func(context.Context) (bool, error) {
 		hpa, err := clients.KubeClient.AutoscalingV2().HorizontalPodAutoscalers(namespace).Get(context.Background(), name, metav1.GetOptions{})
 		if err != nil {
 			return false, err

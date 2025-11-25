@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -31,7 +30,6 @@ import (
 	"knative.dev/pkg/logging"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
-	"knative.dev/serving/pkg/networking"
 	"knative.dev/serving/pkg/reconciler/revision/config"
 	"knative.dev/serving/pkg/reconciler/revision/resources"
 )
@@ -40,27 +38,11 @@ func (c *Reconciler) createDeployment(ctx context.Context, rev *v1.Revision) (*a
 	cfgs := config.FromContext(ctx)
 
 	deployment, err := resources.MakeDeployment(rev, cfgs)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to make deployment: %w", err)
 	}
 
 	return c.kubeclient.AppsV1().Deployments(deployment.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
-}
-
-func (c *Reconciler) createSecret(ctx context.Context, ns *corev1.Namespace) (*corev1.Secret, error) {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            networking.ServingCertName,
-			Namespace:       ns.Name,
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ns, corev1.SchemeGroupVersion.WithKind("Namespace"))},
-			Labels: map[string]string{
-				networking.ServingCertName + "-ctrl": "data-plane-user",
-				"routing-id":                         "0",
-			},
-		},
-	}
-	return c.kubeclient.CoreV1().Secrets(secret.Namespace).Create(ctx, secret, metav1.CreateOptions{})
 }
 
 func (c *Reconciler) checkAndUpdateDeployment(ctx context.Context, rev *v1.Revision, have *appsv1.Deployment) (*appsv1.Deployment, error) {
@@ -116,7 +98,11 @@ func (c *Reconciler) createImageCache(ctx context.Context, rev *v1.Revision, con
 	return c.cachingclient.CachingV1alpha1().Images(image.Namespace).Create(ctx, image, metav1.CreateOptions{})
 }
 
-func (c *Reconciler) createPA(ctx context.Context, rev *v1.Revision) (*autoscalingv1alpha1.PodAutoscaler, error) {
-	pa := resources.MakePA(rev)
+func (c *Reconciler) createPA(
+	ctx context.Context,
+	rev *v1.Revision,
+	deployment *appsv1.Deployment,
+) (*autoscalingv1alpha1.PodAutoscaler, error) {
+	pa := resources.MakePA(rev, deployment)
 	return c.client.AutoscalingV1alpha1().PodAutoscalers(pa.Namespace).Create(ctx, pa, metav1.CreateOptions{})
 }

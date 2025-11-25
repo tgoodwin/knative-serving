@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"knative.dev/pkg/kmap"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,7 +33,6 @@ import (
 
 	netheader "knative.dev/networking/pkg/http/header"
 	"knative.dev/pkg/kmeta"
-	"knative.dev/pkg/metrics"
 	"knative.dev/pkg/ptr"
 	"knative.dev/pkg/system"
 	"knative.dev/serving/pkg/apis/autoscaling"
@@ -41,18 +41,18 @@ import (
 	v1 "knative.dev/serving/pkg/apis/serving/v1"
 	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 	"knative.dev/serving/pkg/deployment"
+	"knative.dev/serving/pkg/observability"
 	"knative.dev/serving/pkg/queue"
 
-	_ "knative.dev/pkg/metrics/testing"
 	. "knative.dev/serving/pkg/testing/v1"
 )
 
 var (
-	servingContainerName         = "serving-container"
-	sidecarContainerName         = "sidecar-container-1"
-	sidecarContainerName2        = "sidecar-container-2"
-	sidecarIstioInjectAnnotation = "sidecar.istio.io/inject"
-	defaultServingContainer      = &corev1.Container{
+	servingContainerName    = "serving-container"
+	sidecarContainerName    = "sidecar-container-1"
+	sidecarContainerName2   = "sidecar-container-2"
+	sidecarIstioInjectLabel = "sidecar.istio.io/inject"
+	defaultServingContainer = &corev1.Container{
 		Name:                     servingContainerName,
 		Image:                    "busybox",
 		Ports:                    buildContainerPorts(v1.DefaultUserPort),
@@ -80,7 +80,7 @@ var (
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
-					Port: intstr.FromInt(int(queueHTTPPort.ContainerPort)),
+					Port: intstr.FromInt32(queueHTTPPort.ContainerPort),
 					HTTPHeaders: []corev1.HTTPHeader{{
 						Name:  netheader.ProbeKey,
 						Value: queue.Name,
@@ -136,50 +136,14 @@ var (
 			Name: "SERVING_LOGGING_LEVEL",
 			// No logging level
 		}, {
-			Name:  "SERVING_REQUEST_LOG_TEMPLATE",
-			Value: "",
-		}, {
-			Name:  "SERVING_ENABLE_REQUEST_LOG",
-			Value: "false",
-		}, {
-			Name:  "SERVING_REQUEST_METRICS_BACKEND",
-			Value: "",
-		}, {
-			Name:  "SERVING_REQUEST_METRICS_REPORTING_PERIOD_SECONDS",
-			Value: "0",
-		}, {
-			Name:  "TRACING_CONFIG_BACKEND",
-			Value: "",
-		}, {
-			Name:  "TRACING_CONFIG_ZIPKIN_ENDPOINT",
-			Value: "",
-		}, {
-			Name:  "TRACING_CONFIG_DEBUG",
-			Value: "false",
-		}, {
-			Name:  "TRACING_CONFIG_SAMPLE_RATE",
-			Value: "0",
-		}, {
 			Name:  "USER_PORT",
 			Value: "8080",
 		}, {
 			Name:  "SYSTEM_NAMESPACE",
 			Value: system.Namespace(),
 		}, {
-			Name:  "METRICS_DOMAIN",
-			Value: metrics.Domain(),
-		}, {
 			Name:  "SERVING_READINESS_PROBE",
 			Value: fmt.Sprintf(`{"tcpSocket":{"port":%d,"host":"127.0.0.1"}}`, v1.DefaultUserPort),
-		}, {
-			Name:  "ENABLE_PROFILING",
-			Value: "false",
-		}, {
-			Name:  "SERVING_ENABLE_PROBE_REQUEST_LOG",
-			Value: "false",
-		}, {
-			Name:  "METRICS_COLLECTOR_ADDRESS",
-			Value: "",
 		}, {
 			Name: "HOST_IP",
 			ValueFrom: &corev1.EnvVarSource{
@@ -189,17 +153,51 @@ var (
 			Name:  "ENABLE_HTTP2_AUTO_DETECTION",
 			Value: "false",
 		}, {
+			Name:  "ENABLE_HTTP_FULL_DUPLEX",
+			Value: "false",
+		}, {
 			Name:  "ROOT_CA",
 			Value: "",
+		}, {
+			Name:  "ENABLE_MULTI_CONTAINER_PROBES",
+			Value: "false",
+		}, {
+			Name:  "OBSERVABILITY_CONFIG",
+			Value: `{"tracing":{},"metrics":{},"runtime":{},"requestMetrics":{}}`,
 		}},
 	}
 
 	defaultPodSpec = &corev1.PodSpec{
-		TerminationGracePeriodSeconds: refInt64(45),
+		TerminationGracePeriodSeconds: ptr.Int64(45),
 		EnableServiceLinks:            ptr.Bool(false),
 	}
 
-	maxUnavailable    = intstr.FromInt(0)
+	defaultPodAntiAffinityRules = &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+			Weight: 100,
+			PodAffinityTerm: corev1.PodAffinityTerm{
+				TopologyKey: "kubernetes.io/hostname",
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						"serving.knative.dev/revision": "bar",
+					},
+				},
+			},
+		}},
+	}
+
+	userDefinedPodAntiAffinityRules = &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			TopologyKey: "kubernetes.io/hostname",
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"serving.knative.dev/revision": "bar",
+				},
+			},
+		}},
+	}
+
+	maxUnavailable    = intstr.FromInt32(0)
 	defaultDeployment = &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "foo",
@@ -227,6 +225,7 @@ var (
 				},
 			},
 			ProgressDeadlineSeconds: ptr.Int32(0),
+			RevisionHistoryLimit:    ptr.Int32(0),
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -240,7 +239,9 @@ var (
 						serving.RevisionUID:      "1234",
 						AppLabelKey:              "bar",
 					},
-					Annotations: map[string]string{},
+					Annotations: map[string]string{
+						DefaultContainerAnnotationName: servingContainerName,
+					},
 				},
 				// Spec: filled in by makePodSpec
 			},
@@ -278,13 +279,11 @@ func defaultRevision() *v1.Revision {
 	}
 }
 
-func refInt64(num int64) *int64 {
-	return &num
-}
-
-type containerOption func(*corev1.Container)
-type podSpecOption func(*corev1.PodSpec)
-type deploymentOption func(*appsv1.Deployment)
+type (
+	containerOption  func(*corev1.Container)
+	podSpecOption    func(*corev1.PodSpec)
+	deploymentOption func(*appsv1.Deployment)
+)
 
 func container(container *corev1.Container, opts ...containerOption) corev1.Container {
 	for _, option := range opts {
@@ -333,7 +332,9 @@ func withTCPReadinessProbe(port int) *corev1.Probe {
 			TCPSocket: &corev1.TCPSocketAction{
 				Host: "127.0.0.1",
 				Port: intstr.FromInt(port),
-			}}}
+			},
+		},
+	}
 }
 
 func withHTTPReadinessProbe(port int) *corev1.Probe {
@@ -343,7 +344,18 @@ func withHTTPReadinessProbe(port int) *corev1.Probe {
 				Port: intstr.FromInt(port),
 				Path: "/",
 			},
-		}}
+		},
+	}
+}
+
+func withGRPCReadinessProbe(port int) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			GRPC: &corev1.GRPCAction{
+				Port: int32(port),
+			},
+		},
+	}
 }
 
 func withExecReadinessProbe(command []string) *corev1.Probe {
@@ -352,7 +364,8 @@ func withExecReadinessProbe(command []string) *corev1.Probe {
 			Exec: &corev1.ExecAction{
 				Command: command,
 			},
-		}}
+		},
+	}
 }
 
 func withLivenessProbe(handler corev1.ProbeHandler) containerOption {
@@ -361,9 +374,21 @@ func withLivenessProbe(handler corev1.ProbeHandler) containerOption {
 	}
 }
 
+func withStartupProbe(handler corev1.ProbeHandler) containerOption {
+	return func(container *corev1.Container) {
+		container.StartupProbe = &corev1.Probe{ProbeHandler: handler}
+	}
+}
+
 func withPrependedVolumeMounts(volumeMounts ...corev1.VolumeMount) containerOption {
 	return func(c *corev1.Container) {
 		c.VolumeMounts = append(volumeMounts, c.VolumeMounts...)
+	}
+}
+
+func withRuntimeClass(name string) podSpecOption {
+	return func(ps *corev1.PodSpec) {
+		ps.RuntimeClassName = ptr.String(name)
 	}
 }
 
@@ -437,6 +462,7 @@ func WithRevisionAnnotations(annotations map[string]string) RevisionOption {
 		revision.Annotations = kmeta.UnionMaps(revision.Annotations, annotations)
 	}
 }
+
 func withContainerConcurrency(cc int64) RevisionOption {
 	return func(revision *v1.Revision) {
 		revision.Spec.ContainerConcurrency = &cc
@@ -525,7 +551,7 @@ func TestMakePodSpec(t *testing.T) {
 	tests := []struct {
 		name     string
 		rev      *v1.Revision
-		oc       metrics.ObservabilityConfig
+		oc       observability.Config
 		defaults *apicfg.Defaults
 		dc       deployment.Config
 		fc       apicfg.Features
@@ -557,7 +583,8 @@ func TestMakePodSpec(t *testing.T) {
 				queueContainer(
 					withEnvVar("USER_PORT", "8888"),
 					withEnvVar("SERVING_READINESS_PROBE", `{"tcpSocket":{"port":8888,"host":"127.0.0.1"}}`),
-				)}),
+				),
+			}),
 	}, {
 		name: "volumes passed through",
 		rev: revision("bar", "foo",
@@ -700,9 +727,11 @@ func TestMakePodSpec(t *testing.T) {
 				ImageDigest: "busybox@sha256:deadbeef",
 			}}),
 		),
-		oc: metrics.ObservabilityConfig{
-			RequestMetricsBackend:   "opencensus",
-			MetricsCollectorAddress: "otel:55678",
+		oc: observability.Config{
+			RequestMetrics: observability.MetricsConfig{
+				Endpoint: "otel:55678",
+				Protocol: "http/protobuf",
+			},
 		},
 		want: podSpec(
 			[]corev1.Container{
@@ -710,8 +739,7 @@ func TestMakePodSpec(t *testing.T) {
 					container.Image = "busybox@sha256:deadbeef"
 				}),
 				queueContainer(
-					withEnvVar("METRICS_COLLECTOR_ADDRESS", "otel:55678"),
-					withEnvVar("SERVING_REQUEST_METRICS_BACKEND", "opencensus"),
+					withEnvVar("OBSERVABILITY_CONFIG", `{"tracing":{},"metrics":{},"runtime":{},"requestMetrics":{"protocol":"http/protobuf","endpoint":"otel:55678"}}`),
 				),
 			}),
 	}, {
@@ -902,7 +930,28 @@ func TestMakePodSpec(t *testing.T) {
 					container.Image = "busybox@sha256:deadbeef"
 				}),
 				queueContainer(
-					withEnvVar("SERVING_READINESS_PROBE", `{"httpGet":{"path":"/","port":8080,"host":"127.0.0.1","scheme":"HTTP","httpHeaders":[{"name":"K-Kubelet-Probe","value":"queue"}]}}`),
+					withEnvVar("SERVING_READINESS_PROBE", `{"httpGet":{"path":"/","port":8080,"host":"127.0.0.1","scheme":"HTTP"}}`),
+				),
+			}),
+	}, {
+		name: "with grpc readiness probe",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				ReadinessProbe: withGRPCReadinessProbe(v1.DefaultUserPort),
+			}}),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}}),
+		),
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(func(container *corev1.Container) {
+					container.Image = "busybox@sha256:deadbeef"
+				}),
+				queueContainer(
+					withEnvVar("SERVING_READINESS_PROBE", `{"grpc":{"port":8080,"service":null}}`),
 				),
 			}),
 	}, {
@@ -977,11 +1026,7 @@ func TestMakePodSpec(t *testing.T) {
 					withLivenessProbe(corev1.ProbeHandler{
 						HTTPGet: &corev1.HTTPGetAction{
 							Path: "/",
-							Port: intstr.FromInt(v1.DefaultUserPort),
-							HTTPHeaders: []corev1.HTTPHeader{{
-								Name:  netheader.KubeletProbeKey,
-								Value: queue.Name,
-							}},
+							Port: intstr.FromInt32(v1.DefaultUserPort),
 						},
 					}),
 				),
@@ -997,7 +1042,9 @@ func TestMakePodSpec(t *testing.T) {
 				LivenessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						TCPSocket: &corev1.TCPSocketAction{},
-					}}}},
+					},
+				},
+			}},
 			),
 			WithContainerStatuses([]v1.ContainerStatus{{
 				ImageDigest: "busybox@sha256:deadbeef",
@@ -1011,8 +1058,71 @@ func TestMakePodSpec(t *testing.T) {
 					},
 					withLivenessProbe(corev1.ProbeHandler{
 						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt(v1.DefaultUserPort),
+							Port: intstr.FromInt32(v1.DefaultUserPort),
 						},
+					}),
+				),
+				queueContainer(),
+			}),
+	}, {
+		name: "with HTTP startup probe",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				ReadinessProbe: withTCPReadinessProbe(v1.DefaultUserPort),
+				StartupProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/",
+						},
+					},
+				},
+			}}),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}}),
+		),
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(
+					func(container *corev1.Container) {
+						container.Image = "busybox@sha256:deadbeef"
+					},
+					withStartupProbe(corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/",
+						},
+					}),
+				),
+				queueContainer(),
+			}),
+	}, {
+		name: "with TCP startup probe",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				ReadinessProbe: withTCPReadinessProbe(v1.DefaultUserPort),
+				StartupProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						TCPSocket: &corev1.TCPSocketAction{},
+					},
+				},
+			}},
+			),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}}),
+		),
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(
+					func(container *corev1.Container) {
+						container.Image = "busybox@sha256:deadbeef"
+					},
+					withStartupProbe(corev1.ProbeHandler{
+						TCPSocket: &corev1.TCPSocketAction{},
 					}),
 				),
 				queueContainer(),
@@ -1048,7 +1158,8 @@ func TestMakePodSpec(t *testing.T) {
 				),
 				queueContainer(
 					withEnvVar("SERVING_SERVICE", "svc"),
-				)}),
+				),
+			}),
 	}, {
 		name: "complex pod spec for multiple containers with container data to all containers",
 		rev: revision("bar", "foo",
@@ -1200,7 +1311,7 @@ func TestMakePodSpec(t *testing.T) {
 		),
 	}, {
 		name: "var-log collection enabled",
-		oc: metrics.ObservabilityConfig{
+		oc: observability.Config{
 			EnableVarLogCollection: true,
 		},
 		rev: revision("bar", "foo",
@@ -1257,6 +1368,7 @@ func TestMakePodSpec(t *testing.T) {
 				}),
 				queueContainer(
 					withEnvVar("SERVING_READINESS_PROBE", `{"tcpSocket":{"port":8080,"host":"127.0.0.1"}}`),
+					withEnvVar("OBSERVABILITY_CONFIG", `{"tracing":{},"metrics":{},"runtime":{},"requestMetrics":{},"EnableVarLogCollection":true}`),
 				),
 			},
 			withAppendedVolumes(varLogVolume),
@@ -1283,7 +1395,7 @@ func TestMakePodSpec(t *testing.T) {
 	}, {
 		name: "qpoption tokens",
 		dc: deployment.Config{
-			QueueSidecarTokenAudiences: sets.NewString("boo-srv"),
+			QueueSidecarTokenAudiences: sets.New("boo-srv"),
 		},
 		rev: revision("bar", "foo",
 			withContainers([]corev1.Container{{
@@ -1340,6 +1452,281 @@ func TestMakePodSpec(t *testing.T) {
 				),
 			},
 		),
+	}, {
+		name: "with multiple containers with readiness probes",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				Ports:          buildContainerPorts(v1.DefaultUserPort),
+				ReadinessProbe: withHTTPReadinessProbe(v1.DefaultUserPort),
+			}, {
+				Name:           sidecarContainerName,
+				Image:          "Ubuntu",
+				ReadinessProbe: withHTTPReadinessProbe(8090),
+			}}),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}, {
+				ImageDigest: "ubuntu@sha256:deadbffe",
+			}}),
+		),
+		fc: apicfg.Features{
+			MultiContainerProbing: apicfg.Enabled,
+		},
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(func(container *corev1.Container) {
+					container.Image = "busybox@sha256:deadbeef"
+				}),
+				sidecarContainer(sidecarContainerName,
+					func(container *corev1.Container) {
+						container.Image = "ubuntu@sha256:deadbffe"
+					},
+				),
+				queueContainer(
+					withEnvVar("ENABLE_MULTI_CONTAINER_PROBES", "true"),
+					withEnvVar("SERVING_READINESS_PROBE", `[{"httpGet":{"path":"/","port":8080,"host":"127.0.0.1","scheme":"HTTP"}},{"httpGet":{"path":"/","port":8090,"host":"127.0.0.1","scheme":"HTTP"}}]`),
+				),
+			}),
+	}, {
+		name: "with multiple containers with exec probes",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				Ports:          buildContainerPorts(v1.DefaultUserPort),
+				ReadinessProbe: withExecReadinessProbe([]string{"bin/sh", "serving.sh"}),
+			}, {
+				Name:           sidecarContainerName,
+				Image:          "Ubuntu",
+				ReadinessProbe: withExecReadinessProbe([]string{"bin/sh", "sidecar.sh"}),
+			}}),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}, {
+				ImageDigest: "ubuntu@sha256:deadbffe",
+			}}),
+		),
+		fc: apicfg.Features{
+			MultiContainerProbing: apicfg.Enabled,
+		},
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(func(container *corev1.Container) {
+					container.Image = "busybox@sha256:deadbeef"
+					container.ReadinessProbe = withExecReadinessProbe([]string{"bin/sh", "serving.sh"})
+				}),
+				sidecarContainer(sidecarContainerName,
+					func(container *corev1.Container) {
+						container.Image = "ubuntu@sha256:deadbffe"
+						container.ReadinessProbe = withExecReadinessProbe([]string{"bin/sh", "sidecar.sh"})
+					},
+				),
+				queueContainer(
+					withEnvVar("ENABLE_MULTI_CONTAINER_PROBES", "true"),
+					withEnvVar("SERVING_READINESS_PROBE", `[{"tcpSocket":{"port":8080,"host":"127.0.0.1"}}]`),
+				),
+			}),
+	}, {
+		name: "with default affinity type set",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				ReadinessProbe: withTCPReadinessProbe(v1.DefaultUserPort),
+			}}),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}}),
+		),
+		fc: apicfg.Features{
+			PodSpecAffinity: apicfg.Disabled,
+		},
+		dc: deployment.Config{
+			DefaultAffinityType: deployment.PreferSpreadRevisionOverNodes,
+		},
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(func(container *corev1.Container) {
+					container.Image = "busybox@sha256:deadbeef"
+				}),
+				queueContainer(),
+			},
+			func(p *corev1.PodSpec) {
+				p.Affinity = &corev1.Affinity{
+					PodAntiAffinity: defaultPodAntiAffinityRules,
+				}
+			},
+		),
+	}, {
+		name: "with default affinity type deactivated",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				ReadinessProbe: withTCPReadinessProbe(v1.DefaultUserPort),
+			}}),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}}),
+		),
+		fc: apicfg.Features{
+			PodSpecAffinity: apicfg.Disabled,
+		},
+		dc: deployment.Config{
+			DefaultAffinityType: deployment.None,
+		},
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(func(container *corev1.Container) {
+					container.Image = "busybox@sha256:deadbeef"
+				}),
+				queueContainer(),
+			},
+		),
+	}, {
+		name: "with affinity rules set by both the user and the operator",
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				ReadinessProbe: withTCPReadinessProbe(v1.DefaultUserPort),
+			}}),
+			WithContainerStatuses([]v1.ContainerStatus{{
+				ImageDigest: "busybox@sha256:deadbeef",
+			}}),
+			func(r *v1.Revision) {
+				r.Spec.Affinity = &corev1.Affinity{
+					PodAntiAffinity: userDefinedPodAntiAffinityRules,
+				}
+			}),
+		fc: apicfg.Features{
+			PodSpecAffinity: apicfg.Enabled,
+		},
+		dc: deployment.Config{
+			DefaultAffinityType: deployment.PreferSpreadRevisionOverNodes,
+		},
+		want: podSpec(
+			[]corev1.Container{
+				servingContainer(func(container *corev1.Container) {
+					container.Image = "busybox@sha256:deadbeef"
+				}),
+				queueContainer(),
+			},
+			func(p *corev1.PodSpec) {
+				p.Affinity = &corev1.Affinity{
+					PodAntiAffinity: userDefinedPodAntiAffinityRules,
+				}
+			},
+		),
+	}, {
+		name: "with runtime-class-name set",
+		dc: deployment.Config{
+			RuntimeClassNames: map[string]deployment.RuntimeClassNameLabelSelector{
+				"gvisor": {},
+			},
+		},
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				Ports:          buildContainerPorts(v1.DefaultUserPort),
+				ReadinessProbe: withHTTPReadinessProbe(v1.DefaultUserPort),
+			}}),
+		),
+		want: podSpec([]corev1.Container{
+			servingContainer(func(container *corev1.Container) {
+				container.Image = "busybox"
+			}),
+			queueContainer(
+				withEnvVar("SERVING_READINESS_PROBE", `{"httpGet":{"path":"/","port":8080,"host":"127.0.0.1","scheme":"HTTP"}}`),
+			),
+		}, withRuntimeClass("gvisor")),
+	}, {
+		name: "with runtime-class-name set requiring selector and no label set in revision",
+		dc: deployment.Config{
+			RuntimeClassNames: map[string]deployment.RuntimeClassNameLabelSelector{
+				"gvisor": {
+					Selector: map[string]string{
+						"this-one": "specifically",
+					},
+				},
+			},
+		},
+		rev: revision("bar", "foo",
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				Ports:          buildContainerPorts(v1.DefaultUserPort),
+				ReadinessProbe: withHTTPReadinessProbe(v1.DefaultUserPort),
+			}}),
+		),
+		want: podSpec([]corev1.Container{
+			servingContainer(func(container *corev1.Container) {
+				container.Image = "busybox"
+			}),
+			queueContainer(
+				withEnvVar("SERVING_READINESS_PROBE", `{"httpGet":{"path":"/","port":8080,"host":"127.0.0.1","scheme":"HTTP"}}`),
+			),
+		}),
+	}, {
+		name: "with runtime-class-name set requiring selector and label set in revision",
+		dc: deployment.Config{
+			RuntimeClassNames: map[string]deployment.RuntimeClassNameLabelSelector{
+				"gvisor": {
+					Selector: map[string]string{
+						"this-one": "specifically",
+					},
+				},
+			},
+		},
+		rev: revision("bar", "foo",
+			WithRevisionLabel("this-one", "specifically"),
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				Ports:          buildContainerPorts(v1.DefaultUserPort),
+				ReadinessProbe: withHTTPReadinessProbe(v1.DefaultUserPort),
+			}}),
+		),
+		want: podSpec([]corev1.Container{
+			servingContainer(func(container *corev1.Container) {
+				container.Image = "busybox"
+			}),
+			queueContainer(
+				withEnvVar("SERVING_READINESS_PROBE", `{"httpGet":{"path":"/","port":8080,"host":"127.0.0.1","scheme":"HTTP"}}`),
+			),
+		}, withRuntimeClass("gvisor")),
+	}, {
+		name: "with multiple runtime-class-name set and label selector for one",
+		dc: deployment.Config{
+			RuntimeClassNames: map[string]deployment.RuntimeClassNameLabelSelector{
+				"gvisor": {},
+				"kata": {
+					Selector: map[string]string{
+						"specific": "this-one",
+					},
+				},
+			},
+		},
+		rev: revision("bar", "foo",
+			WithRevisionLabel("specific", "this-one"),
+			withContainers([]corev1.Container{{
+				Name:           servingContainerName,
+				Image:          "busybox",
+				Ports:          buildContainerPorts(v1.DefaultUserPort),
+				ReadinessProbe: withHTTPReadinessProbe(v1.DefaultUserPort),
+			}}),
+		),
+		want: podSpec([]corev1.Container{
+			servingContainer(func(container *corev1.Container) {
+				container.Image = "busybox"
+			}),
+			queueContainer(
+				withEnvVar("SERVING_READINESS_PROBE", `{"httpGet":{"path":"/","port":8080,"host":"127.0.0.1","scheme":"HTTP"}}`),
+			),
+		}, withRuntimeClass("kata")),
 	}}
 
 	for _, test := range tests {
@@ -1420,16 +1807,16 @@ func TestMakeDeployment(t *testing.T) {
 			WithContainerStatuses([]v1.ContainerStatus{{
 				ImageDigest: "busybox@sha256:deadbeef",
 			}}),
-			withoutLabels, func(revision *v1.Revision) {
-				revision.Annotations = map[string]string{
-					sidecarIstioInjectAnnotation: "false",
+			func(revision *v1.Revision) {
+				revision.Labels = map[string]string{
+					sidecarIstioInjectLabel: "false",
 				}
 			}),
 		want: appsv1deployment(func(deploy *appsv1.Deployment) {
-			deploy.Annotations = kmeta.UnionMaps(deploy.Annotations,
-				map[string]string{sidecarIstioInjectAnnotation: "false"})
-			deploy.Spec.Template.Annotations = kmeta.UnionMaps(deploy.Spec.Template.Annotations,
-				map[string]string{sidecarIstioInjectAnnotation: "false"})
+			deploy.Labels = kmap.Union(deploy.Labels,
+				map[string]string{sidecarIstioInjectLabel: "false"})
+			deploy.Spec.Template.Labels = kmap.Union(deploy.Spec.Template.Labels,
+				map[string]string{sidecarIstioInjectLabel: "false"})
 		}),
 	}, {
 		name: "with progress-deadline override",
@@ -1462,8 +1849,13 @@ func TestMakeDeployment(t *testing.T) {
 			}}), withoutLabels),
 		want: appsv1deployment(func(deploy *appsv1.Deployment) {
 			deploy.Spec.ProgressDeadlineSeconds = ptr.Int32(42)
-			deploy.Annotations = map[string]string{serving.ProgressDeadlineAnnotationKey: "42s"}
-			deploy.Spec.Template.Annotations = map[string]string{serving.ProgressDeadlineAnnotationKey: "42s"}
+			deploy.Annotations = map[string]string{
+				serving.ProgressDeadlineAnnotationKey: "42s",
+			}
+			deploy.Spec.Template.Annotations = map[string]string{
+				DefaultContainerAnnotationName:        servingContainerName,
+				serving.ProgressDeadlineAnnotationKey: "42s",
+			}
 		}),
 	}, {
 		name: "with ProgressDeadline annotation and configmap override",
@@ -1482,8 +1874,13 @@ func TestMakeDeployment(t *testing.T) {
 			}}), withoutLabels),
 		want: appsv1deployment(func(deploy *appsv1.Deployment) {
 			deploy.Spec.ProgressDeadlineSeconds = ptr.Int32(42)
-			deploy.Annotations = map[string]string{serving.ProgressDeadlineAnnotationKey: "42s"}
-			deploy.Spec.Template.Annotations = map[string]string{serving.ProgressDeadlineAnnotationKey: "42s"}
+			deploy.Annotations = map[string]string{
+				serving.ProgressDeadlineAnnotationKey: "42s",
+			}
+			deploy.Spec.Template.Annotations = map[string]string{
+				DefaultContainerAnnotationName:        servingContainerName,
+				serving.ProgressDeadlineAnnotationKey: "42s",
+			}
 		}),
 	}, {
 		name: "cluster initial scale",
@@ -1519,8 +1916,13 @@ func TestMakeDeployment(t *testing.T) {
 		),
 		want: appsv1deployment(func(deploy *appsv1.Deployment) {
 			deploy.Spec.Replicas = ptr.Int32(int32(20))
-			deploy.Spec.Template.Annotations = map[string]string{autoscaling.InitialScaleAnnotationKey: "20"}
-			deploy.Annotations = map[string]string{autoscaling.InitialScaleAnnotationKey: "20"}
+			deploy.Annotations = map[string]string{
+				autoscaling.InitialScaleAnnotationKey: "20",
+			}
+			deploy.Spec.Template.Annotations = map[string]string{
+				autoscaling.InitialScaleAnnotationKey: "20",
+				DefaultContainerAnnotationName:        servingContainerName,
+			}
 		}),
 	}}
 

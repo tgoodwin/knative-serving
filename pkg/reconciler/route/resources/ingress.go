@@ -26,12 +26,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"knative.dev/serving/pkg/reconciler/route/domains"
 
 	"knative.dev/networking/pkg/apis/networking"
 	netv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
-	netcfg "knative.dev/networking/pkg/config"
 	netheader "knative.dev/networking/pkg/http/header"
-	ingress "knative.dev/networking/pkg/ingress"
 	"knative.dev/pkg/kmeta"
 	"knative.dev/pkg/logging"
 	"knative.dev/serving/pkg/activator"
@@ -40,8 +39,6 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	servingnetworking "knative.dev/serving/pkg/networking"
 	"knative.dev/serving/pkg/reconciler/route/config"
-	"knative.dev/serving/pkg/reconciler/route/domains"
-	"knative.dev/serving/pkg/reconciler/route/resources/labels"
 	"knative.dev/serving/pkg/reconciler/route/resources/names"
 	"knative.dev/serving/pkg/reconciler/route/traffic"
 )
@@ -145,12 +142,12 @@ func makeIngressSpec(
 			visibilities = append(visibilities, netv1alpha1.IngressVisibilityExternalIP)
 		}
 		for _, visibility := range visibilities {
-			domains, err := routeDomain(ctx, name, r, visibility)
+			domains, err := domains.GetDomainsForVisibility(ctx, name, r, visibility)
 			if err != nil {
 				return netv1alpha1.IngressSpec{}, err
 			}
 			rule := makeIngressRule(domains, r.Namespace,
-				visibility, tc.Targets[name], ro.RolloutsByTag(name), networkConfig.DataplaneTrust != netcfg.TrustDisabled)
+				visibility, tc.Targets[name], ro.RolloutsByTag(name), networkConfig.SystemInternalTLSEnabled())
 			if featuresConfig.TagHeaderBasedRouting == apicfg.Enabled {
 				if rule.HTTP.Paths[0].AppendHeaders == nil {
 					rule.HTTP.Paths[0].AppendHeaders = make(map[string]string, 1)
@@ -172,7 +169,7 @@ func makeIngressSpec(
 					// Since names are sorted `DefaultTarget == ""` is the first one,
 					// so just pass the subslice.
 					rule.HTTP.Paths = append(
-						makeTagBasedRoutingIngressPaths(r.Namespace, tc, ro, networkConfig.DataplaneTrust != netcfg.TrustDisabled, names[1:]), rule.HTTP.Paths...)
+						makeTagBasedRoutingIngressPaths(r.Namespace, tc, ro, networkConfig.SystemInternalTLSEnabled(), names[1:]), rule.HTTP.Paths...)
 				} else {
 					// If a request is routed by a tag-attached hostname instead of the tag header,
 					// the request may not have the tag header "Knative-Serving-Tag",
@@ -206,30 +203,9 @@ func makeIngressSpec(
 	}, nil
 }
 
-func routeDomain(ctx context.Context, targetName string, r *servingv1.Route, visibility netv1alpha1.IngressVisibility) (sets.String, error) {
-	hostname, err := domains.HostnameFromTemplate(ctx, r.Name, targetName)
-	if err != nil {
-		return nil, err
-	}
-
-	meta := r.ObjectMeta.DeepCopy()
-	isClusterLocal := visibility == netv1alpha1.IngressVisibilityClusterLocal
-	labels.SetVisibility(meta, isClusterLocal)
-
-	domain, err := domains.DomainNameFromTemplate(ctx, *meta, hostname)
-	if err != nil {
-		return nil, err
-	}
-	domains := []string{domain}
-	if isClusterLocal {
-		domains = ingress.ExpandedHosts(sets.NewString(domains...)).List()
-	}
-	return sets.NewString(domains...), err
-}
-
 // MakeACMEIngressPaths returns a set of netv1alpha1.HTTPIngressPath
 // that can be used to perform ACME challenges.
-func MakeACMEIngressPaths(acmeChallenges []netv1alpha1.HTTP01Challenge, domains sets.String) ([]netv1alpha1.HTTPIngressPath, []string) {
+func MakeACMEIngressPaths(acmeChallenges []netv1alpha1.HTTP01Challenge, domains sets.Set[string]) ([]netv1alpha1.HTTPIngressPath, []string) {
 	paths := make([]netv1alpha1.HTTPIngressPath, 0, len(acmeChallenges))
 	var extraHosts []string
 
@@ -253,13 +229,14 @@ func MakeACMEIngressPaths(acmeChallenges []netv1alpha1.HTTP01Challenge, domains 
 	return paths, extraHosts
 }
 
-func makeIngressRule(domains sets.String, ns string,
+func makeIngressRule(domains sets.Set[string], ns string,
 	visibility netv1alpha1.IngressVisibility,
 	targets traffic.RevisionTargets,
 	roCfgs []*traffic.ConfigurationRollout,
-	encryption bool) netv1alpha1.IngressRule {
+	encryption bool,
+) netv1alpha1.IngressRule {
 	return netv1alpha1.IngressRule{
-		Hosts:      domains.List(),
+		Hosts:      sets.List(domains),
 		Visibility: visibility,
 		HTTP: &netv1alpha1.HTTPIngressRuleValue{
 			Paths: []netv1alpha1.HTTPIngressPath{
@@ -294,7 +271,8 @@ func rolloutConfig(cfgName string, ros []*traffic.ConfigurationRollout) *traffic
 }
 
 func makeBaseIngressPath(ns string, targets traffic.RevisionTargets,
-	roCfgs []*traffic.ConfigurationRollout, encryption bool) *netv1alpha1.HTTPIngressPath {
+	roCfgs []*traffic.ConfigurationRollout, encryption bool,
+) *netv1alpha1.HTTPIngressPath {
 	// Optimistically allocate |targets| elements.
 	splits := make([]netv1alpha1.IngressBackendSplit, 0, len(targets))
 	for _, t := range targets {
